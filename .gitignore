@@ -1,0 +1,28 @@
+# Gradle
+/build/
+.gradle/
+gradle-app.setting
+!gradle-wrapper.jar
+
+# Local config
+local.properties
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Kotlin
+*.class
+
+# Signing
+*.jks
+*.keystore
+key.properties
+
