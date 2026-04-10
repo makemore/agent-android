@@ -26,6 +26,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.view.ViewGroup
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.media3.common.MediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import com.makemore.agentfrontend.models.*
 
@@ -54,6 +62,7 @@ fun ContentBlockRenderer(
                 is CollapsibleBlock -> CollapsibleBlockView(block)
                 is StatusBlock -> StatusBlockView(block)
                 is LocationBlock -> LocationBlockView(block)
+                is VideoBlock -> VideoBlockView(block)
             }
         }
     }
@@ -407,4 +416,63 @@ fun LocationBlockView(block: LocationBlock) {
     }
 }
 
+// =============================================================================
+// Video
+// =============================================================================
+
+@Composable
+fun VideoBlockView(block: VideoBlock) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        block.title?.let {
+            Text(it, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        }
+
+        val exoPlayer = remember {
+            ExoPlayer.Builder(context).build().apply {
+                setMediaItem(MediaItem.fromUri(block.url))
+                prepare()
+                playWhenReady = block.autoplay
+            }
+        }
+
+        DisposableEffect(lifecycleOwner) {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
+                    Lifecycle.Event.ON_RESUME -> { /* user controls playback */ }
+                    else -> {}
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose {
+                lifecycleOwner.lifecycle.removeObserver(observer)
+                exoPlayer.release()
+            }
+        }
+
+        AndroidView(
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    player = exoPlayer
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                    useController = true
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp)
+                .clip(RoundedCornerShape(8.dp))
+        )
+
+        block.caption?.let {
+            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 

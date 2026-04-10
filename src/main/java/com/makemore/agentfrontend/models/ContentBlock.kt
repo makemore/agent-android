@@ -26,6 +26,7 @@ sealed interface ContentBlock {
                 "collapsible" -> CollapsibleBlock.fromMap(map)
                 "status" -> StatusBlock.fromMap(map)
                 "location" -> LocationBlock.fromMap(map)
+                "video" -> VideoBlock.fromMap(map)
                 else -> null
             }
         }
@@ -244,3 +245,25 @@ data class LocationBlock(
         )
     }
 }
+
+data class VideoBlock(
+    override val type: String = "video",
+    val url: String = "",
+    val title: String? = null,
+    val caption: String? = null,
+    val thumbnailUrl: String? = null,
+    val autoplay: Boolean = false,
+    val mimeType: String? = null
+) : ContentBlock {
+    companion object {
+        fun fromMap(map: Map<String, Any?>): VideoBlock = VideoBlock(
+            url = map["url"] as? String ?: "",
+            title = map["title"] as? String,
+            caption = map["caption"] as? String,
+            thumbnailUrl = map["thumbnailUrl"] as? String,
+            autoplay = map["autoplay"] as? Boolean ?: false,
+            mimeType = map["mimeType"] as? String
+        )
+    }
+}
+
