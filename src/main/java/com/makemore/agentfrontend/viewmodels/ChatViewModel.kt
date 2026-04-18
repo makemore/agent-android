@@ -8,7 +8,18 @@ import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
 import com.makemore.agentfrontend.services.StorageService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 import java.net.URLEncoder
 import java.util.Date
 
@@ -43,6 +54,36 @@ class ChatViewModel(
     private var sseClient: SSEClient? = null
     private var assistantContent: String = ""
     private var hasRestoredConversation: Boolean = false
+
+    // -- Streaming buffer --
+    // Decouples network receive rate from visual display rate. Providers emit
+    // tokens in bursts; rendering those bursts directly causes visible stutter.
+    // Deltas are buffered and drained at a steady cadence.
+    private var streamBuffer: StringBuilder = StringBuilder()
+    private var drainJob: Job? = null
+    private val drainIntervalMs: Long = 33L   // ~30 Hz
+    /** Set true when server signals stream end — lets the drain accelerate. */
+    private var streamingDone: Boolean = false
+    /** ID of the in-flight streaming message; tracked explicitly so we can
+     *  find it even after non-streaming messages have been appended. */
+    private var currentStreamingMessageId: String? = null
+    /** Set true when an `assistant.message` finalises the current turn; any
+     *  further `assistant.delta` events are dropped so they don't spawn a
+     *  duplicate typewriter bubble. Reset on any non-streaming event. */
+    private var turnFinalized: Boolean = false
+
+    // -- Sub-agent echo suppression --
+    /** Snapshot of the sub-agent's last streamed answer, captured at
+     *  `sub_agent.end`. The parent agent often re-streams the same text
+     *  verbatim as its own deltas; this lets us detect and suppress that
+     *  echo while still rendering genuinely novel parent output. */
+    private var pendingEchoReference: String? = null
+    /** Parent deltas buffered silently while we're still deciding whether
+     *  its output is an echo. Chars here are not committed to any bubble. */
+    private var pendingEchoBuffer: StringBuilder = StringBuilder()
+    /** Once the parent's stream diverges from the snapshot we stop
+     *  comparing and treat subsequent deltas as a normal stream. */
+    private var pendingEchoDiverged: Boolean = false
 
     init {
         // Load saved conversation ID
@@ -319,6 +360,10 @@ class ChatViewModel(
         }
 
         assistantContent = ""
+        resetStreamBuffer()
+        currentStreamingMessageId = null
+        turnFinalized = false
+        clearPendingEcho()
 
         val client = SSEClient()
         sseClient = client
@@ -341,6 +386,7 @@ class ChatViewModel(
         config.onEvent?.invoke(event.type, payload)
 
         when (event.type) {
+            "assistant.delta" -> handleAssistantDelta(payload)
             "assistant.message" -> handleAssistantMessage(payload)
             "tool.call" -> handleToolCall(payload)
             "tool.result" -> handleToolResult(payload)
@@ -352,27 +398,142 @@ class ChatViewModel(
         }
     }
 
+    private fun handleAssistantDelta(payload: Map<String, Any?>) {
+        val delta = payload["delta"] as? String ?: return
+
+        // Drop late-arriving deltas for a turn whose authoritative
+        // `assistant.message` has already been applied. A new turn is
+        // signalled by any non-streaming event, which resets `turnFinalized`.
+        if (turnFinalized) return
+
+        // Sub-agent echo suppression: if a sub-agent just finished, buffer
+        // parent deltas silently while they still match the snapshot as a
+        // prefix. Render only when the parent diverges or extends past it.
+        val reference = pendingEchoReference
+        if (reference != null && !pendingEchoDiverged) {
+            pendingEchoBuffer.append(delta)
+            val buffered = pendingEchoBuffer.toString()
+            if (reference.startsWith(buffered)) {
+                return
+            }
+            pendingEchoDiverged = true
+            pendingEchoReference = null
+            val replay = if (buffered.startsWith(reference)) {
+                buffered.substring(reference.length)
+            } else {
+                buffered
+            }
+            pendingEchoBuffer = StringBuilder()
+            if (replay.isEmpty()) return
+            assistantContent = ""
+            resetStreamBuffer()
+            streamBuffer.append(replay)
+            startDrainTimerIfNeeded()
+            return
+        }
+
+        // `currentStreamingMessageId` is the reliable signal that we're
+        // still inside an active streaming session. A just-snapped bubble
+        // shares the "assistant-stream-" prefix but belongs to a finalised
+        // turn — the next delta must create a fresh bubble below it.
+        if (currentStreamingMessageId == null) {
+            assistantContent = ""
+            resetStreamBuffer()
+        }
+
+        streamBuffer.append(delta)
+        startDrainTimerIfNeeded()
+    }
+
+    /**
+     * Handle an `assistant.message` event — the final authoritative text
+     * emitted after any deltas (or on its own when streaming is off).
+     * We *replace* the accumulator with the full content so the message is
+     * correct whether or not the client received every delta.
+     */
     private fun handleAssistantMessage(payload: Map<String, Any?>) {
         val content = payload["content"] as? String ?: return
-        assistantContent += content
 
-        val lastIndex = messages.lastIndex
-        if (lastIndex >= 0 &&
-            messages[lastIndex].role == MessageRole.ASSISTANT &&
-            messages[lastIndex].id.startsWith("assistant-stream-")
-        ) {
-            messages[lastIndex] = messages[lastIndex].copy(content = assistantContent)
+        // Unconditionally mark the turn finalised — the server's "this turn
+        // is done" signal. Any `assistant.delta` that arrives later must be
+        // dropped to avoid a second typewriter bubble.
+        turnFinalized = true
+
+        // Sub-agent echo resolution. If we were still comparing the parent's
+        // stream against a sub-agent snapshot when the final message lands,
+        // the snapshot's bubble already shows the authoritative text.
+        val reference = pendingEchoReference
+        if (reference != null) {
+            clearPendingEcho()
+            if (content == reference || reference.startsWith(content)) {
+                return
+            }
+            if (content.startsWith(reference)) {
+                val suffix = content.substring(reference.length)
+                if (suffix.isEmpty()) return
+                assistantContent = suffix
+                upsertStreamingMessage(assistantContent)
+                closeStreamingSession()
+                turnFinalized = true
+                return
+            }
+            // Parent said something genuinely different — fall through.
+        }
+
+        // If deltas are still draining, the same content is already queued
+        // in streamBuffer; snapping here would produce a visible leap to
+        // the end. Let the drain finish smoothly.
+        if (drainJob != null || streamBuffer.isNotEmpty()) {
+            return
+        }
+
+        assistantContent = content
+        upsertStreamingMessage(assistantContent)
+        closeStreamingSession()
+        turnFinalized = true
+    }
+
+    /**
+     * Create or update the in-flight streaming assistant message. Uses
+     * `currentStreamingMessageId` to locate it even after non-streaming
+     * messages have been appended below.
+     */
+    private fun upsertStreamingMessage(content: String) {
+        val id = currentStreamingMessageId
+        val idx = if (id != null) messages.indexOfFirst { it.id == id } else -1
+        if (idx >= 0) {
+            messages[idx] = messages[idx].copy(content = content)
         } else {
+            val newId = "assistant-stream-${System.nanoTime()}"
+            currentStreamingMessageId = newId
             messages.add(Message(
-                id = "assistant-stream-${System.currentTimeMillis()}",
+                id = newId,
                 role = MessageRole.ASSISTANT,
-                content = assistantContent,
+                content = content,
                 type = MessageType.MESSAGE
             ))
         }
     }
 
+    /**
+     * Close out the current streaming session before inserting any
+     * non-delta message. Flushes any pending buffer into the current
+     * bubble and forgets the streaming ID so the next text event creates
+     * a new bubble below the inserted non-streaming one.
+     */
+    private fun closeStreamingSession() {
+        if (drainJob != null || streamBuffer.isNotEmpty()) {
+            flushStreamBuffer()
+        }
+        currentStreamingMessageId = null
+        assistantContent = ""
+        streamingDone = false
+        turnFinalized = false
+    }
+
     private fun handleToolCall(payload: Map<String, Any?>) {
+        closeStreamingSession()
+        clearPendingEcho()
         val name = payload["name"] as? String ?: "tool"
         messages.add(Message(
             id = "tool-call-${System.currentTimeMillis()}",
@@ -389,6 +550,7 @@ class ChatViewModel(
 
     @Suppress("UNCHECKED_CAST")
     private fun handleToolResult(payload: Map<String, Any?>) {
+        closeStreamingSession()
         val result = payload["result"] as? Map<String, Any?>
         val isError = result?.containsKey("error") == true
         val content = if (isError) "❌ ${result?.get("error") ?: "Error"}" else "✓ Done"
@@ -407,6 +569,8 @@ class ChatViewModel(
     }
 
     private fun handleSubAgentStart(payload: Map<String, Any?>) {
+        closeStreamingSession()
+        clearPendingEcho()
         val agentName = payload["agent_name"] as? String
             ?: payload["sub_agent_key"] as? String ?: "sub-agent"
         messages.add(Message(
@@ -423,6 +587,11 @@ class ChatViewModel(
     }
 
     private fun handleSubAgentEnd(payload: Map<String, Any?>) {
+        closeStreamingSession()
+        // Capture the sub-agent's final streamed text as the echo reference
+        // so the parent's upcoming re-stream of the same answer can be
+        // suppressed while letting the sub-agent's narration render.
+        val echoReference = lastStreamedAssistantText()
         val agentName = payload["agent_name"] as? String ?: "Sub-agent"
         messages.add(Message(
             id = "sub-agent-end-${System.currentTimeMillis()}",
@@ -434,10 +603,16 @@ class ChatViewModel(
                 agentName = payload["agent_name"] as? String
             )
         ))
+        if (!echoReference.isNullOrEmpty()) {
+            pendingEchoReference = echoReference
+            pendingEchoBuffer = StringBuilder()
+            pendingEchoDiverged = false
+        }
     }
 
     @Suppress("UNCHECKED_CAST")
     private fun handleContentBlocks(payload: Map<String, Any?>) {
+        closeStreamingSession()
         val blocksArray = payload["blocks"] as? List<Map<String, Any?>> ?: return
         val blocks = ContentBlock.parse(blocksArray)
         if (blocks.isEmpty()) return
@@ -456,6 +631,7 @@ class ChatViewModel(
     }
 
     private fun handleCustomEvent(payload: Map<String, Any?>) {
+        closeStreamingSession()
         if (payload["type"] == "agent_context") {
             val agentName = payload["agent_name"] as? String ?: "Sub-agent"
             messages.add(Message(
@@ -473,6 +649,10 @@ class ChatViewModel(
 
     private fun handleTerminalEvent(type: String, payload: Map<String, Any?>) {
         if (type == "run.failed") {
+            // Close the stream so the error doesn't orphan a streaming bubble
+            // or let subsequent text overwrite it.
+            closeStreamingSession()
+            clearPendingEcho()
             val errMsg = payload["error"] as? String ?: "Agent run failed"
             error.value = errMsg
             messages.add(Message(
@@ -481,6 +661,12 @@ class ChatViewModel(
                 content = "❌ Error: $errMsg",
                 type = MessageType.ERROR
             ))
+        } else {
+            // Success / cancelled / timed-out: let the drain timer finish
+            // smoothly at its elevated rate; flushing would produce a
+            // visible leap. The timer self-cancels when the buffer empties.
+            streamingDone = true
+            clearPendingEcho()
         }
 
         isLoading.value = false
@@ -489,20 +675,122 @@ class ChatViewModel(
         currentRunId = null
     }
 
+    // -- Stream buffer helpers --
+
+    /** Start the drain loop if it isn't already running. */
+    private fun startDrainTimerIfNeeded() {
+        if (drainJob != null) return
+        drainJob = viewModelScope.launch {
+            while (isActive) {
+                delay(drainIntervalMs)
+                if (!drainTick()) break
+            }
+        }
+    }
+
+    /**
+     * Move a slice of buffered chars into the visible message. Rate is
+     * adaptive: large buffers drain faster so long responses don't lag
+     * far behind the server.
+     *
+     * @return false if the drain is complete and the loop should exit.
+     */
+    private fun drainTick(): Boolean {
+        if (streamBuffer.isEmpty()) {
+            drainJob = null
+            streamingDone = false
+            return false
+        }
+        val pending = streamBuffer.length
+        val cap = if (streamingDone) 6 else 2
+        val take = maxOf(1, minOf(pending / 120, cap))
+        val slice = streamBuffer.substring(0, take)
+        streamBuffer.delete(0, take)
+        assistantContent += slice
+        upsertStreamingMessage(assistantContent)
+        return true
+    }
+
+    /** Drain all remaining buffered chars and stop the loop. */
+    private fun flushStreamBuffer() {
+        if (streamBuffer.isNotEmpty()) {
+            assistantContent += streamBuffer.toString()
+            streamBuffer = StringBuilder()
+            upsertStreamingMessage(assistantContent)
+        }
+        drainJob?.cancel()
+        drainJob = null
+    }
+
+    /** Drop buffered chars and stop the loop (used on stream start). */
+    private fun resetStreamBuffer() {
+        streamBuffer = StringBuilder()
+        drainJob?.cancel()
+        drainJob = null
+        streamingDone = false
+    }
+
+    /** Reset sub-agent echo-suppression state at turn boundaries. */
+    private fun clearPendingEcho() {
+        pendingEchoReference = null
+        pendingEchoBuffer = StringBuilder()
+        pendingEchoDiverged = false
+    }
+
+    /**
+     * Content of the most recent streamed assistant bubble, used as the
+     * echo-suppression reference when a sub-agent has just ended.
+     * Intermediate tool-call, tool-result, content-block and sub-agent
+     * markers are skipped.
+     */
+    private fun lastStreamedAssistantText(): String? {
+        for (i in messages.indices.reversed()) {
+            val msg = messages[i]
+            if (msg.role == MessageRole.ASSISTANT && msg.type == MessageType.MESSAGE && msg.content.isNotEmpty()) {
+                return msg.content
+            }
+        }
+        return null
+    }
+
     // -- Message Mapping --
 
     private fun mapApiMessage(m: APIMessage): List<Message> {
         val timestamp = Date() // Simplified — could parse m.timestamp
 
-        // Tool result messages (role: "tool")
+        // Tool result messages (role: "tool"). If the backend persisted
+        // contentBlocks on the tool message, synthesise an extra bubble so
+        // rich UI (videos, cards, etc.) re-renders on conversation reload.
         if (m.role == "tool") {
-            return listOf(Message(
+            val out = mutableListOf(Message(
                 role = MessageRole.SYSTEM,
                 content = "✓ Done",
                 timestamp = timestamp,
                 type = MessageType.TOOL_RESULT,
-                metadata = MessageMetadata(toolCallId = m.toolCallId, result = m.content)
+                metadata = MessageMetadata(
+                    toolName = m.metadata?.toolName,
+                    toolCallId = m.toolCallId,
+                    result = m.content
+                )
             ))
+            val rawBlocks = m.metadata?.contentBlocks
+            if (!rawBlocks.isNullOrEmpty()) {
+                val blocks = ContentBlock.parse(rawBlocks.map { it.toAnyMap() })
+                if (blocks.isNotEmpty()) {
+                    out.add(Message(
+                        role = MessageRole.ASSISTANT,
+                        content = "",
+                        timestamp = timestamp,
+                        type = MessageType.CONTENT_BLOCKS,
+                        metadata = MessageMetadata(
+                            toolName = m.metadata?.toolName,
+                            toolCallId = m.toolCallId,
+                            contentBlocks = blocks
+                        )
+                    ))
+                }
+            }
+            return out
         }
 
         // Assistant messages with tool calls
@@ -535,5 +823,16 @@ class ChatViewModel(
             type = MessageType.MESSAGE
         ))
     }
+}
+
+/** Convert a JsonObject to the raw Map<String, Any?> shape ContentBlock.parse expects. */
+private fun JsonObject.toAnyMap(): Map<String, Any?> =
+    mapValues { (_, v) -> v.toAnyValue() }
+
+private fun JsonElement.toAnyValue(): Any? = when (this) {
+    is JsonNull -> null
+    is JsonPrimitive -> booleanOrNull ?: longOrNull ?: doubleOrNull ?: content
+    is JsonObject -> toAnyMap()
+    is JsonArray -> map { it.toAnyValue() }
 }
 

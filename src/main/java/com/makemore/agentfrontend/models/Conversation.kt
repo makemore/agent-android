@@ -2,6 +2,7 @@ package com.makemore.agentfrontend.models
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 /**
  * A conversation containing messages.
@@ -24,7 +25,23 @@ data class APIMessage(
     val content: String? = null,
     val timestamp: String? = null,
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
-    @SerialName("tool_call_id") val toolCallId: String? = null
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val metadata: APIMessageMetadata? = null
+)
+
+/**
+ * Metadata carried on an API message. The backend persists rich UI data
+ * (e.g. contentBlocks from tool results) here so conversations can be
+ * re-rendered faithfully on reload without replaying the SSE stream.
+ *
+ * `contentBlocks` is kept as a raw `List<JsonObject>` so the existing
+ * `ContentBlock.parse(List<Map<String, Any?>>)` helper can handle the
+ * same shape used for live `content.blocks` SSE payloads.
+ */
+@Serializable
+data class APIMessageMetadata(
+    val contentBlocks: List<JsonObject>? = null,
+    @SerialName("tool_name") val toolName: String? = null
 )
 
 /** Tool call from API */
