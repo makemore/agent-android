@@ -179,6 +179,13 @@ class ChatViewModel(
                 apiClient.cancelRun(runId)
                 sseClient?.disconnect()
                 sseClient = null
+                // Drop any buffered-but-not-yet-drained characters and stop the
+                // typewriter loop. Without this, the drain job keeps revealing
+                // whatever the server sent before the disconnect — the user sees
+                // text continuing to type for seconds after tapping Stop. This
+                // differs from the natural-end path (`handleTerminalEvent`) which
+                // deliberately lets the drain finish smoothly.
+                resetStreamBuffer()
                 isLoading.value = false
                 currentRunId = null
 
