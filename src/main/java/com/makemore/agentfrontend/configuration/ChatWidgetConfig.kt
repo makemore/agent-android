@@ -99,7 +99,14 @@ data class ChatWidgetConfig(
     /** Event callback for SSE events */
     val onEvent: ((String, Map<String, Any?>) -> Unit)? = null,
     /** Auth error callback */
-    val onAuthError: ((Exception) -> Unit)? = null
+    val onAuthError: ((Exception) -> Unit)? = null,
+    /**
+     * Video full-screen toggle callback. Invoked with `true` when a `VideoBlockView`
+     * enters full-screen playback and `false` when it exits. Host apps can use this
+     * to manage orientation locks or other chrome. Orientation handling is
+     * intentionally left to the host.
+     */
+    val onVideoFullScreenChange: ((Boolean) -> Unit)? = null
 ) {
     companion object {
         /** Create a configuration with common settings */

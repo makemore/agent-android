@@ -52,8 +52,12 @@ fun MessageView(
     if (message.type == MessageType.CONTENT_BLOCKS) {
         val blocks = message.metadata?.contentBlocks
         if (!blocks.isNullOrEmpty()) {
-            ContentBlockRenderer(blocks = blocks, onAction = onBlockAction,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp))
+            ContentBlockRenderer(
+                blocks = blocks,
+                onAction = onBlockAction,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                config = config,
+            )
             return
         }
     }

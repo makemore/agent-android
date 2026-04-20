@@ -37,6 +37,7 @@ import androidx.media3.ui.PlayerView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 
 // =============================================================================
@@ -47,7 +48,8 @@ import com.makemore.agentfrontend.models.*
 fun ContentBlockRenderer(
     blocks: List<ContentBlock>,
     onAction: ((BlockAction) -> Unit)? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    config: ChatWidgetConfig? = null,
 ) {
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
@@ -64,7 +66,10 @@ fun ContentBlockRenderer(
                 is CollapsibleBlock -> CollapsibleBlockView(block)
                 is StatusBlock -> StatusBlockView(block)
                 is LocationBlock -> LocationBlockView(block)
-                is VideoBlock -> VideoBlockView(block)
+                is VideoBlock -> VideoBlockView(
+                    block,
+                    onFullScreenChange = config?.onVideoFullScreenChange,
+                )
             }
         }
     }
