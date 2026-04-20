@@ -34,6 +34,8 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
 import com.makemore.agentfrontend.models.*
 
@@ -421,57 +423,105 @@ fun LocationBlockView(block: LocationBlock) {
 // =============================================================================
 
 @Composable
-fun VideoBlockView(block: VideoBlock) {
+fun VideoBlockView(
+    block: VideoBlock,
+    onFullScreenChange: ((Boolean) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    var isFullScreen by remember { mutableStateOf(false) }
+
+    val exoPlayer = remember {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(MediaItem.fromUri(block.url))
+            prepare()
+            playWhenReady = block.autoplay
+        }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
+                Lifecycle.Event.ON_RESUME -> { /* user controls playback */ }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            exoPlayer.release()
+        }
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         block.title?.let {
             Text(it, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         }
 
-        val exoPlayer = remember {
-            ExoPlayer.Builder(context).build().apply {
-                setMediaItem(MediaItem.fromUri(block.url))
-                prepare()
-                playWhenReady = block.autoplay
-            }
+        if (!isFullScreen) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        player = exoPlayer
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        )
+                        useController = true
+                        setFullscreenButtonClickListener { enter ->
+                            isFullScreen = enter
+                            onFullScreenChange?.invoke(enter)
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .clip(RoundedCornerShape(8.dp))
+            )
         }
-
-        DisposableEffect(lifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                when (event) {
-                    Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
-                    Lifecycle.Event.ON_RESUME -> { /* user controls playback */ }
-                    else -> {}
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose {
-                lifecycleOwner.lifecycle.removeObserver(observer)
-                exoPlayer.release()
-            }
-        }
-
-        AndroidView(
-            factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    layoutParams = ViewGroup.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT
-                    )
-                    useController = true
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(220.dp)
-                .clip(RoundedCornerShape(8.dp))
-        )
 
         block.caption?.let {
             Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+
+    if (isFullScreen) {
+        Dialog(
+            onDismissRequest = {
+                isFullScreen = false
+                onFullScreenChange?.invoke(false)
+            },
+            properties = DialogProperties(
+                dismissOnBackPress = true,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false,
+            ),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black)
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            player = exoPlayer
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            useController = true
+                            setFullscreenButtonClickListener { enter ->
+                                isFullScreen = enter
+                                onFullScreenChange?.invoke(enter)
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
     }
 }
