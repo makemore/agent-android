@@ -65,6 +65,7 @@ class APIClient(
         val url = "${config.backendUrl}${config.apiPaths.anonymousSession}"
         val request = Request.Builder()
             .url(url)
+            .header("X-Api-Format", "camel")
             .post("".toRequestBody("application/json".toMediaType()))
             .build()
 
@@ -131,6 +132,10 @@ class APIClient(
         authHeaders(token).forEach { (key, value) ->
             builder.header(key, value)
         }
+        // Opt in to the camelCase JSON wire format on backends that
+        // support per-request format negotiation. Backends that do
+        // not recognise the header simply ignore it.
+        builder.header("X-Api-Format", "camel")
 
         when (method) {
             "GET" -> builder.get()

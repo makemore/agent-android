@@ -12,13 +12,23 @@ data class Scenario(
     val subtitle: String,
     val kind: Kind,
     val prompt: String,
-    val followUps: List<HostConfiguration.FollowUp>
+    val followUps: List<HostConfiguration.FollowUp>,
+    /** When non-null, forces the agent key for this scenario instead of
+     *  reading the launcher's "Agent key" field. Used by Resilient
+     *  scenarios to pin `sai-triage` so the user doesn't have to retype
+     *  it after switching backends. */
+    val agentKeyOverride: String? = null
 ) {
     sealed class Kind {
         /** Replays the named JSON fixture via the local Python stub server. */
         data class Stub(val fixture: String) : Kind()
         /** Hits the real Django `agent_studio` backend with DRF token auth. */
         data object RealBackend : Kind()
+        /** Hits a real Resilient backend (`/api/agent-runtime/`) with DRF
+         *  token auth. Same wire format as [RealBackend] — the separate
+         *  kind exists so the launcher can group these under their own
+         *  section and pre-pin the `sai-triage` agent key. */
+        data object Resilient : Kind()
     }
 }
 
@@ -104,6 +114,39 @@ object Scenarios {
                     delayMs = 2000
                 )
             )
+        )
+    )
+
+    /** Resilient scenarios — point the launcher's "Django URL" field at
+     *  a running Resilient backend (`./manage.py runserver` or `runagent`)
+     *  and paste the DRF token. Agent key is pinned to `sai-triage`. */
+    val resilient: List<Scenario> = listOf(
+        Scenario(
+            id = "resilient_simple",
+            title = "sai-triage: hello round-trip",
+            subtitle = "Single LLM round trip — sanity-check token + URL + camelCase wiring",
+            kind = Scenario.Kind.Resilient,
+            prompt = "Reply with exactly the words: hello from agent builder",
+            followUps = emptyList(),
+            agentKeyOverride = "sai-triage"
+        ),
+        Scenario(
+            id = "resilient_big",
+            title = "sai-triage: 3-turn ACK test",
+            subtitle = "ACK-ALPHA → ACK-BRAVO → RECAP, exercises memory + multi-run SSE",
+            kind = Scenario.Kind.Resilient,
+            prompt = "Reply with exactly the token ACK-ALPHA on its own line, then a one-sentence greeting.",
+            followUps = listOf(
+                HostConfiguration.FollowUp(
+                    prompt = "Now reply with exactly the token ACK-BRAVO on its own line, then a one-sentence weather remark.",
+                    delayMs = 2000
+                ),
+                HostConfiguration.FollowUp(
+                    prompt = "Recap: list the two ACK tokens you used so far, in order, on a single line that begins with the literal prefix RECAP: (e.g. \"RECAP: ACK-ALPHA, ACK-BRAVO\").",
+                    delayMs = 2000
+                )
+            ),
+            agentKeyOverride = "sai-triage"
         )
     )
 }

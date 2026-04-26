@@ -17,6 +17,15 @@ class SSEClient {
     private var call: Call? = null
     private var scope: CoroutineScope? = null
 
+    /// Set by `disconnect()` so the stream coroutine and OkHttp callback can
+    /// distinguish a deliberate teardown after a terminal SSE event (surface
+    /// as `onComplete`) from a genuine network failure (surface as `onError`).
+    /// Without this, calling `disconnect()` after `run.succeeded` cancels the
+    /// scope before the `finally` block can fire `onComplete`, leaving any
+    /// `CompletableDeferred`-based awaiter (see ChatViewModel.subscribeToEvents)
+    /// suspended forever. Mirrors the iOS `expectingDisconnect` flag.
+    private var expectingDisconnect = false
+
     private val client = OkHttpClient.Builder()
         .readTimeout(java.time.Duration.ofMinutes(5))
         .build()
@@ -24,6 +33,7 @@ class SSEClient {
     /** Connect to an SSE endpoint */
     fun connect(url: String, headers: Map<String, String> = emptyMap()) {
         disconnect()
+        expectingDisconnect = false
 
         val requestBuilder = Request.Builder()
             .url(url)
@@ -43,7 +53,12 @@ class SSEClient {
 
         newCall.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                if (!call.isCanceled()) {
+                // Deliberate teardown after a terminal event — surface as a
+                // clean completion so the awaiter resumes. Otherwise route
+                // through the normal error path.
+                if (call.isCanceled() || expectingDisconnect) {
+                    onComplete?.invoke()
+                } else {
                     onError?.invoke(e)
                 }
             }
@@ -66,12 +81,19 @@ class SSEClient {
                     try {
                         processStream(source)
                     } catch (e: Exception) {
-                        if (!call.isCanceled()) {
-                            withContext(Dispatchers.Main) { onError?.invoke(e) }
+                        if (!call.isCanceled() && !expectingDisconnect) {
+                            withContext(NonCancellable + Dispatchers.Main) {
+                                onError?.invoke(e)
+                            }
                         }
                     } finally {
-                        response.close()
-                        withContext(Dispatchers.Main) { onComplete?.invoke() }
+                        // Run cleanup under NonCancellable so `onComplete`
+                        // still fires when `disconnect()` cancelled the
+                        // scope in response to a terminal SSE event.
+                        withContext(NonCancellable) {
+                            response.close()
+                            withContext(Dispatchers.Main) { onComplete?.invoke() }
+                        }
                     }
                 }
             }
@@ -80,6 +102,7 @@ class SSEClient {
 
     /** Disconnect from the SSE endpoint */
     fun disconnect() {
+        expectingDisconnect = true
         call?.cancel()
         call = null
         scope?.cancel()

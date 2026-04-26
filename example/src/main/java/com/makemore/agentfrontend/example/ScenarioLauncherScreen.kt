@@ -62,7 +62,7 @@ fun ScenarioLauncherScreen(
         settings.save(stubUrl, backendUrl, authToken, agentKey)
         return HostConfiguration(
             backendUrl = backendUrl,
-            agentKey = agentKey,
+            agentKey = scenario.agentKeyOverride ?: agentKey,
             testFixture = "",
             autoSendOnLaunch = true,
             autoSendPrompt = scenario.prompt,
@@ -113,6 +113,28 @@ fun ScenarioLauncherScreen(
                 }
             } else {
                 items(Scenarios.realBackend, key = { it.id }) { scenario ->
+                    ScenarioRow(scenario) { onScenarioPicked(realHost(scenario)) }
+                }
+            }
+
+            // Resilient (`/Users/chris/Projects/resilient/backend`) shares the
+            // Django URL + DRF token fields above. Agent key is pinned to
+            // `sai-triage` per scenario; the launcher's own agent-key field
+            // is ignored for these rows.
+            item { SectionHeader("Resilient (sai-triage)") }
+            if (authToken.isBlank()) {
+                item {
+                    Text(
+                        "Set DRF token above to enable. Point Django URL at " +
+                            "your Resilient runserver (default http://10.0.2.2:8000 " +
+                            "for the Android emulator).",
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                items(Scenarios.resilient, key = { it.id }) { scenario ->
                     ScenarioRow(scenario) { onScenarioPicked(realHost(scenario)) }
                 }
             }
