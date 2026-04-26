@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Permits cleartext HTTP from the instrumented test APK so the
+         streaming UI tests can talk to the local Python stub server
+         (clients/test-stub-server/) over plain HTTP from the emulator
+         host (`10.0.2.2`). Production library consumers are unaffected
+         because this manifest is debug-only and not merged into release. -->
+    <application
+        android:usesCleartextTraffic="true"
+        tools:ignore="UnusedAttribute" />
+
+</manifest>

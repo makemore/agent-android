@@ -43,6 +43,13 @@ fun InputView(
     var inputText by remember { mutableStateOf("") }
     val canSend = inputText.isNotBlank()
     var isRecording by remember { mutableStateOf(false) }
+    // Monotonic token captured by the speech recognition listener so a
+    // late onResults() delivered after cancel()/send cannot repopulate the
+    // field. SpeechRecognizer.cancel() is documented to suppress further
+    // notifications, but in practice a result already queued on the main
+    // looper still arrives. The guard makes the suppression unconditional.
+    val sessionRef = remember { intArrayOf(0) }
+    val activeSessionRef = remember { intArrayOf(0) }
     var hasAudioPermission by remember { mutableStateOf(false) }
     val context = LocalContext.current
     
@@ -55,6 +62,10 @@ fun InputView(
     DisposableEffect(Unit) {
         val listener = object : RecognitionListener {
             override fun onResults(results: Bundle?) {
+                if (activeSessionRef[0] != sessionRef[0]) {
+                    isRecording = false
+                    return
+                }
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
                     inputText = if (inputText.isBlank()) matches[0] else "$inputText ${matches[0]}"
@@ -81,6 +92,11 @@ fun InputView(
 
     fun doSend() {
         if (canSend) {
+            if (isRecording) {
+                sessionRef[0]++
+                speechRecognizer.cancel()
+                isRecording = false
+            }
             onSend(inputText, emptyList())
             inputText = ""
         }
@@ -115,6 +131,10 @@ fun InputView(
             IconButton(
                 onClick = {
                     if (isRecording) {
+                        // Don't bump session here: stopListening() asks the engine
+                        // to deliver any pending result via onResults, which is the
+                        // user's intent when they tap the mic button. Send/destroy
+                        // bump the session because the user no longer wants the result.
                         speechRecognizer.stopListening()
                         isRecording = false
                     } else {
@@ -126,6 +146,8 @@ fun InputView(
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                         }
+                        sessionRef[0]++
+                        activeSessionRef[0] = sessionRef[0]
                         speechRecognizer.startListening(intent)
                         isRecording = true
                     }

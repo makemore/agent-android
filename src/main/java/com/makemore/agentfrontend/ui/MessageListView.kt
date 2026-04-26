@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.Message
@@ -47,18 +48,66 @@ fun MessageListView(
         }
     }
 
-    // Auto-scroll to bottom when new messages arrive
-    LaunchedEffect(displayMessages.size) {
-        if (displayMessages.isNotEmpty()) {
-            listState.animateScrollToItem(displayMessages.size - 1 + (if (isLoading) 1 else 0))
+    // Auto-scroll behaviour:
+    // - A `followStream` flag tracks whether the list is pinned to the
+    //   bottom. It flips off the moment the user drags upward and flips
+    //   back on only when they scroll to (or past) the last item again.
+    // - A new row (new bubble / tool call / thinking spinner) animates
+    //   scroll when `followStream` is true.
+    // - Streaming content deltas fire at ~30 Hz; while `followStream` is
+    //   true they snap with a non-animated `scrollToItem` anchored to the
+    //   bottom of the last item (scrollOffset = Int.MAX_VALUE). While
+    //   `followStream` is false the snap is skipped entirely so the user
+    //   can read earlier content without being yanked back down.
+    val targetIndex = (displayMessages.size - 1 + (if (isLoading) 1 else 0)).coerceAtLeast(0)
+
+    var followStream by remember { mutableStateOf(true) }
+
+    // Convert the dp threshold to px once per density so the snapshotFlow
+    // body stays cheap. Mirrors iOS ChatWidgetConfig.nearBottomThresholdPt:
+    // the user can scroll up to this many dp away from the bottom and we
+    // still consider the list "at bottom" for streaming auto-follow.
+    val density = LocalDensity.current
+    val thresholdPx = remember(density, config.nearBottomThresholdPt) {
+        with(density) { config.nearBottomThresholdPt.dp.roundToPx() }
+    }
+
+    LaunchedEffect(listState, thresholdPx) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            if (layout.totalItemsCount == 0) return@snapshotFlow true
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()
+                ?: return@snapshotFlow false
+            // Last item must be the tail item — if the user has scrolled
+            // far enough that even the last index has dropped off the
+            // visible window, we are clearly not near bottom.
+            if (lastVisible.index < layout.totalItemsCount - 1) return@snapshotFlow false
+            // Overflow: how many px the last item extends below the
+            // viewport bottom. ≤0 means it fits fully (true bottom);
+            // 0..thresholdPx means the user has scrolled up a little but
+            // still wants to follow; >thresholdPx means stop pulling.
+            val lastBottom = lastVisible.offset + lastVisible.size
+            val overflow = lastBottom - layout.viewportEndOffset
+            overflow <= thresholdPx
+        }.collect { atBottom -> followStream = atBottom }
+    }
+
+    LaunchedEffect(displayMessages.size, isLoading) {
+        if ((displayMessages.isNotEmpty() || isLoading) && followStream) {
+            listState.animateScrollToItem(targetIndex, scrollOffset = Int.MAX_VALUE)
         }
     }
 
-    // Auto-scroll when streaming content updates
     val lastContent = displayMessages.lastOrNull()?.second?.content
     LaunchedEffect(lastContent) {
-        if (displayMessages.isNotEmpty()) {
-            listState.animateScrollToItem(displayMessages.size - 1 + (if (isLoading) 1 else 0))
+        if (displayMessages.isEmpty()) return@LaunchedEffect
+        // Host-app opt-out: when streaming follow is disabled the list
+        // stays put and the user controls scrolling while the reply
+        // generates. New rows (count change, isLoading) are still pinned
+        // by the other LaunchedEffect.
+        if (!config.followStreamingEnabled) return@LaunchedEffect
+        if (followStream && !listState.isScrollInProgress) {
+            listState.scrollToItem(targetIndex, scrollOffset = Int.MAX_VALUE)
         }
     }
 

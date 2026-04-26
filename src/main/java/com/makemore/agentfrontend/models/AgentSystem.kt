@@ -1,6 +1,5 @@
 package com.makemore.agentfrontend.models
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
@@ -13,11 +12,11 @@ data class AgentSystem(
     val slug: String,
     val name: String,
     val description: String? = null,
-    @SerialName("is_active") val isActive: Boolean = true,
-    @SerialName("entry_agent") val entryAgent: AgentDefinitionSummary? = null,
+    val isActive: Boolean = true,
+    val entryAgent: AgentDefinitionSummary? = null,
     val members: List<AgentSystemMember>? = null,
     val versions: List<AgentSystemVersionSummary>? = null,
-    @SerialName("active_version") val activeVersion: String? = null
+    val activeVersion: String? = null
 )
 
 /** Summary of an agent definition (used in system listings) */
@@ -28,8 +27,8 @@ data class AgentDefinitionSummary(
     val name: String,
     val description: String? = null,
     val icon: String? = null,
-    @SerialName("is_active") val isActive: Boolean = true,
-    @SerialName("active_version") val activeVersion: String? = null,
+    val isActive: Boolean = true,
+    val activeVersion: String? = null,
     val versions: List<AgentVersionSummary>? = null
 )
 
@@ -38,10 +37,10 @@ data class AgentDefinitionSummary(
 data class AgentVersionSummary(
     val id: String,
     val version: String,
-    @SerialName("is_active") val isActive: Boolean = false,
-    @SerialName("is_draft") val isDraft: Boolean = false,
+    val isActive: Boolean = false,
+    val isDraft: Boolean = false,
     val model: String? = null,
-    @SerialName("created_at") val createdAt: String? = null
+    val createdAt: String? = null
 )
 
 /** A member agent within a system */
@@ -59,10 +58,10 @@ data class AgentSystemMember(
 data class AgentSystemVersionSummary(
     val id: String,
     val version: String,
-    @SerialName("is_active") val isActive: Boolean = false,
-    @SerialName("is_draft") val isDraft: Boolean = false,
-    @SerialName("release_notes") val releaseNotes: String? = null,
-    @SerialName("published_at") val publishedAt: String? = null
+    val isActive: Boolean = false,
+    val isDraft: Boolean = false,
+    val releaseNotes: String? = null,
+    val publishedAt: String? = null
 )
 
 /** Response wrapper for paginated system lists */

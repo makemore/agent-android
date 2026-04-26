@@ -48,6 +48,23 @@ data class ChatWidgetConfig(
     val showSystemPicker: Boolean = true,
     /** Show tool call/result messages in chat (hidden when false, like web frontend) */
     val showToolMessages: Boolean = true,
+    /**
+     * Follow the assistant's streaming reply by auto-scrolling to the
+     * bottom on every token. When `false` the list stays put while the
+     * reply is being generated and the user controls scrolling. The
+     * pin-to-bottom on user submit and on initial render is unaffected.
+     * Default is `true` for backwards compatibility.
+     */
+    val followStreamingEnabled: Boolean = true,
+    /**
+     * How close to the bottom (in dp) the list must be before streaming
+     * deltas are allowed to pull the scroll position down. Once the user
+     * drags more than this distance away from the bottom the auto-follow
+     * pauses until they scroll back. Drop it close to `0f` for strict
+     * follow ("any scroll up disables it"), raise it to ~300f for a
+     * looser feel that ignores small drags. Default `100f` matches iOS.
+     */
+    val nearBottomThresholdPt: Float = 100f,
 
     // -- Authentication --
     /** Authentication strategy */

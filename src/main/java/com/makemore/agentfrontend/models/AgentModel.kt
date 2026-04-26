@@ -1,6 +1,5 @@
 package com.makemore.agentfrontend.models
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
@@ -13,7 +12,7 @@ data class AgentModel(
     val name: String,
     val provider: String,
     val description: String? = null,
-    @SerialName("supports_thinking") val supportsThinking: Boolean = false
+    val supportsThinking: Boolean = false
 )
 
 /** Models list response */
@@ -30,7 +29,7 @@ data class TaskItem(
     val name: String,
     val description: String? = null,
     val state: String = "not_started",
-    @SerialName("parent_id") val parentId: String? = null
+    val parentId: String? = null
 ) {
     val taskState: TaskState
         get() = TaskState.fromValue(state)
@@ -71,6 +70,6 @@ data class TaskList(
 data class TaskProgress(
     val total: Int = 0,
     val completed: Int = 0,
-    @SerialName("percent_complete") val percentComplete: Double = 0.0
+    val percentComplete: Double = 0.0
 )
 

@@ -8,6 +8,7 @@ import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
 import com.makemore.agentfrontend.services.StorageService
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -85,6 +86,17 @@ class ChatViewModel(
      *  comparing and treat subsequent deltas as a normal stream. */
     private var pendingEchoDiverged: Boolean = false
 
+    // -- Stream completion awaiter --
+    /** Resolved when the in-flight SSE stream reaches a terminal state
+     *  (run.succeeded / run.failed / run.cancelled / transport error or
+     *  manual cancel). Lets [sendMessageAndAwait] suspend until the run
+     *  truly finishes — without it the launched coroutine returns the
+     *  moment `client.connect()` is enqueued and a scripted follow-up
+     *  message is silently dropped by the `isLoading` guard. Single-shot:
+     *  only one stream is in flight at a time because [sendMessage] is
+     *  gated by [isLoading]. */
+    private var streamCompletion: CompletableDeferred<Unit>? = null
+
     init {
         // Load saved conversation ID
         storage.get(config.conversationIdKey)?.let { conversationId.value = it }
@@ -117,7 +129,32 @@ class ChatViewModel(
 
     // -- Send Message --
 
+    /**
+     * Fire-and-forget send. Compose-friendly: callable directly from a
+     * button `onClick`. The launched coroutine awaits the full SSE stream
+     * before returning, so subsequent calls from inside a single launched
+     * scope queue naturally behind it.
+     */
     fun sendMessage(
+        content: String,
+        files: List<FileAttachment> = emptyList(),
+        model: String? = null,
+        thinking: Boolean = false,
+        supersedeFromMessageIndex: Int? = null
+    ) {
+        viewModelScope.launch {
+            sendMessageAndAwait(content, files, model, thinking, supersedeFromMessageIndex)
+        }
+    }
+
+    /**
+     * Suspending send that returns when the stream reaches a terminal
+     * state (succeeded / failed / cancelled / transport error). Use this
+     * from coroutine-driven flows (instrumented tests, host scripts) that
+     * need to enqueue follow-up turns sequentially without losing them
+     * to the [isLoading] guard.
+     */
+    suspend fun sendMessageAndAwait(
         content: String,
         files: List<FileAttachment> = emptyList(),
         model: String? = null,
@@ -137,35 +174,35 @@ class ChatViewModel(
             files = files.ifEmpty { null }
         ))
 
-        viewModelScope.launch {
-            try {
-                val apiMessages = listOf(mapOf("role" to "user", "content" to trimmed))
+        try {
+            val apiMessages = listOf(mapOf("role" to "user", "content" to trimmed))
 
-                val run = apiClient.createRun(
-                    conversationId = conversationId.value,
-                    messages = apiMessages,
-                    model = model,
-                    thinking = thinking,
-                    supersedeFromMessageIndex = supersedeFromMessageIndex,
-                    agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
-                    systemVersionId = selectedSystemVersionId.value
-                )
+            val run = apiClient.createRun(
+                conversationId = conversationId.value,
+                messages = apiMessages,
+                model = model,
+                thinking = thinking,
+                supersedeFromMessageIndex = supersedeFromMessageIndex,
+                agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
+                systemVersionId = selectedSystemVersionId.value
+            )
 
-                currentRunId = run.id
+            currentRunId = run.id
 
-                // Update conversation ID if new
-                if (conversationId.value == null && run.conversationId != null) {
-                    conversationId.value = run.conversationId
-                    storage.set(config.conversationIdKey, run.conversationId)
-                }
-
-                // Subscribe to SSE events
-                subscribeToEvents(run.id)
-
-            } catch (e: Exception) {
-                error.value = e.message
-                isLoading.value = false
+            // Update conversation ID if new
+            if (conversationId.value == null && run.conversationId != null) {
+                conversationId.value = run.conversationId
+                storage.set(config.conversationIdKey, run.conversationId)
             }
+
+            // Subscribe to SSE events and suspend until the stream
+            // reaches a terminal state.
+            subscribeToEvents(run.id)
+
+        } catch (e: Exception) {
+            error.value = e.message
+            isLoading.value = false
+            resolveStreamCompletion()
         }
     }
 
@@ -194,8 +231,12 @@ class ChatViewModel(
                     content = "⏹ Run cancelled",
                     type = MessageType.CANCELLED
                 ))
+                // Wake any awaiter inside `subscribeToEvents`.
+                resolveStreamCompletion()
             } catch (e: Exception) {
-                // Silently fail cancel
+                // Silently fail cancel — but still wake the awaiter so a
+                // pending `sendMessageAndAwait` doesn't hang forever.
+                resolveStreamCompletion()
             }
         }
     }
@@ -375,14 +416,38 @@ class ChatViewModel(
         val client = SSEClient()
         sseClient = client
 
+        // Single-shot completion gate. Resolved by `onComplete`,
+        // `onError`, or `cancelRun` — whichever fires first. The await
+        // below suspends [sendMessageAndAwait] until that happens.
+        val completion = CompletableDeferred<Unit>()
+        streamCompletion = completion
+
         client.onEvent = { event -> handleSSEEvent(event) }
         client.onError = { e ->
             isLoading.value = false
             error.value = e.message
+            resolveStreamCompletion()
         }
-        client.onComplete = { isLoading.value = false }
+        client.onComplete = {
+            isLoading.value = false
+            resolveStreamCompletion()
+        }
 
         client.connect(urlString, apiClient.authHeaders())
+
+        // Suspend until terminal state. Safe under structured concurrency:
+        // if the parent coroutine is cancelled, the await throws and the
+        // outer try/finally in [sendMessageAndAwait] handles cleanup.
+        completion.await()
+    }
+
+    /** Single-shot resume of the in-flight stream awaiter. Safe to call
+     *  from `onComplete`, `onError`, and [cancelRun]; only the first call
+     *  resolves the deferred, subsequent calls are no-ops. */
+    private fun resolveStreamCompletion() {
+        val pending = streamCompletion ?: return
+        streamCompletion = null
+        pending.complete(Unit)
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -439,11 +504,21 @@ class ChatViewModel(
             return
         }
 
-        // `currentStreamingMessageId` is the reliable signal that we're
-        // still inside an active streaming session. A just-snapped bubble
+        // Detect a *fresh* stream session — one with nothing in-flight to
+        // belong to. We can't rely on `currentStreamingMessageId` alone:
+        // that ID is only assigned on the first `drainTick`, so when
+        // multiple deltas arrive within the same coroutine tick (network
+        // bursts where several SSE events sit in the same socket read,
+        // or replay in tests) the later deltas would all see a null ID
+        // and wipe each other's contribution to the buffer. Treat any of:
+        // an existing bubble, a running drain job, or un-drained buffered
+        // text as proof we're still mid-session. A just-snapped bubble
         // shares the "assistant-stream-" prefix but belongs to a finalised
         // turn — the next delta must create a fresh bubble below it.
-        if (currentStreamingMessageId == null) {
+        val hasActiveSession = currentStreamingMessageId != null
+            || drainJob != null
+            || streamBuffer.isNotEmpty()
+        if (!hasActiveSession) {
             assistantContent = ""
             resetStreamBuffer()
         }
@@ -509,7 +584,7 @@ class ChatViewModel(
         val id = currentStreamingMessageId
         val idx = if (id != null) messages.indexOfFirst { it.id == id } else -1
         if (idx >= 0) {
-            messages[idx] = messages[idx].copy(content = content)
+            messages[idx] = messages[idx].copy(content = content, isStreaming = true)
         } else {
             val newId = "assistant-stream-${System.nanoTime()}"
             currentStreamingMessageId = newId
@@ -517,7 +592,8 @@ class ChatViewModel(
                 id = newId,
                 role = MessageRole.ASSISTANT,
                 content = content,
-                type = MessageType.MESSAGE
+                type = MessageType.MESSAGE,
+                isStreaming = true,
             ))
         }
     }
@@ -531,6 +607,14 @@ class ChatViewModel(
     private fun closeStreamingSession() {
         if (drainJob != null || streamBuffer.isNotEmpty()) {
             flushStreamBuffer()
+        }
+        // Flip the outgoing streaming bubble off the fast-path renderer
+        // so it re-renders once with full Markdown.
+        currentStreamingMessageId?.let { id ->
+            val idx = messages.indexOfFirst { it.id == id }
+            if (idx >= 0 && messages[idx].isStreaming) {
+                messages[idx] = messages[idx].copy(isStreaming = false)
+            }
         }
         currentStreamingMessageId = null
         assistantContent = ""
@@ -698,7 +782,10 @@ class ChatViewModel(
     /**
      * Move a slice of buffered chars into the visible message. Rate is
      * adaptive: large buffers drain faster so long responses don't lag
-     * far behind the server.
+     * far behind the server. A short word-boundary lookahead lets short
+     * words land as a unit instead of being cut into 2-char pulses,
+     * which reads as much smoother at the same effective char-per-second
+     * rate.
      *
      * @return false if the drain is complete and the loop should exit.
      */
@@ -710,7 +797,23 @@ class ChatViewModel(
         }
         val pending = streamBuffer.length
         val cap = if (streamingDone) 6 else 2
-        val take = maxOf(1, minOf(pending / 120, cap))
+        var take = maxOf(1, minOf(pending / 120, cap))
+
+        // Word-boundary preference: if the slice would end mid-word,
+        // look ahead a few chars and extend through the next whitespace
+        // so the word lands whole. Long words (no space within the
+        // lookahead window) still reveal at the base rate, preserving
+        // the typewriter feel for them.
+        if (take < pending && !streamBuffer[take - 1].isWhitespace()) {
+            val lookahead = minOf(pending - take, 5)
+            for (offset in 0 until lookahead) {
+                if (streamBuffer[take + offset].isWhitespace()) {
+                    take += offset + 1
+                    break
+                }
+            }
+        }
+
         val slice = streamBuffer.substring(0, take)
         streamBuffer.delete(0, take)
         assistantContent += slice

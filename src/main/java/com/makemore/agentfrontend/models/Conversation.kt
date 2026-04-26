@@ -1,6 +1,5 @@
 package com.makemore.agentfrontend.models
 
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 
@@ -13,9 +12,9 @@ data class Conversation(
     val id: String,
     val title: String? = null,
     val messages: List<APIMessage>? = null,
-    @SerialName("has_more") val hasMore: Boolean? = null,
-    @SerialName("created_at") val createdAt: String? = null,
-    @SerialName("updated_at") val updatedAt: String? = null
+    val hasMore: Boolean? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null
 )
 
 /** API message format (for decoding from backend) */
@@ -24,8 +23,8 @@ data class APIMessage(
     val role: String,
     val content: String? = null,
     val timestamp: String? = null,
-    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
-    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val toolCalls: List<ToolCall>? = null,
+    val toolCallId: String? = null,
     val metadata: APIMessageMetadata? = null
 )
 
@@ -41,7 +40,7 @@ data class APIMessage(
 @Serializable
 data class APIMessageMetadata(
     val contentBlocks: List<JsonObject>? = null,
-    @SerialName("tool_name") val toolName: String? = null
+    val toolName: String? = null
 )
 
 /** Tool call from API */
@@ -64,7 +63,7 @@ data class ToolFunction(
 @Serializable
 data class AgentRun(
     val id: String,
-    @SerialName("conversation_id") val conversationId: String? = null
+    val conversationId: String? = null
 )
 
 /** Conversation list response */

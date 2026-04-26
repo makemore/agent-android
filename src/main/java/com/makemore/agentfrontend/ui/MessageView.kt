@@ -13,6 +13,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,6 +50,11 @@ fun MessageView(
     val isSystem = message.role == MessageRole.SYSTEM
     val isToolMessage = message.type == MessageType.TOOL_CALL || message.type == MessageType.TOOL_RESULT
 
+    // Bubble-side identifier shared by both render paths so UI tests can
+    // assert content (regular text, callouts, action buttons) lives inside
+    // the correct user/assistant container. Mirrors iOS chat.message.*.
+    val bubbleTag = if (isUser) "chat.message.user" else "chat.message.assistant"
+
     // Content blocks: render as standalone rich content
     if (message.type == MessageType.CONTENT_BLOCKS) {
         val blocks = message.metadata?.contentBlocks
@@ -55,7 +62,11 @@ fun MessageView(
             ContentBlockRenderer(
                 blocks = blocks,
                 onAction = onBlockAction,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .semantics(mergeDescendants = false) {}
+                    .testTag(bubbleTag),
                 config = config,
             )
             return
@@ -65,7 +76,9 @@ fun MessageView(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp),
+            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .semantics(mergeDescendants = false) {}
+            .testTag(bubbleTag),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         if (isUser) Spacer(modifier = Modifier.weight(0.2f))
@@ -102,8 +115,11 @@ fun MessageView(
                     Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                // Render assistant messages as markdown, user messages as plain text
-                if (!isUser && !isToolMessage && !isSystem && message.content.isNotBlank()) {
+                // Render assistant messages as markdown once the stream
+                // finishes; during streaming use plain Text so the bubble
+                // doesn't reflow on every delta as the Markdown parser
+                // re-interprets partial syntax (e.g. `**hello` -> `**hello**`).
+                if (!isUser && !isToolMessage && !isSystem && message.content.isNotBlank() && !message.isStreaming) {
                     val isDark = isSystemInDarkTheme()
                     val highlights = remember(isDark) {
                         Highlights.Builder().theme(SyntaxThemes.atom(darkMode = isDark))

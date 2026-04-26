@@ -6,6 +6,7 @@ pluginManagement {
     }
     plugins {
         id("com.android.library") version "8.7.3"
+        id("com.android.application") version "8.7.3"
         id("org.jetbrains.kotlin.android") version "2.1.0"
         id("org.jetbrains.kotlin.plugin.compose") version "2.1.0"
         id("org.jetbrains.kotlin.plugin.serialization") version "2.1.0"
@@ -21,4 +22,10 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "agent-frontend"
+
+// Sample host app — manual scenario launcher for the chat widget. Mirrors
+// `clients/agent-ios/Example`. Open this directory in Android Studio and
+// run the `:example` configuration to launch the launcher on a device or
+// emulator. The library itself is consumed via `project(":")`.
+include(":example")
 

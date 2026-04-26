@@ -34,8 +34,13 @@ fun ChatWidgetView(
 
     val focusManager = LocalFocusManager.current
 
+    // `imePadding()` lifts the input row above the soft keyboard when the
+    // host Activity uses edge-to-edge (in which case `adjustResize` no
+    // longer auto-shrinks the layout and the IME inset must be consumed
+    // by Compose).
     Column(modifier = modifier
         .fillMaxSize()
+        .imePadding()
         .pointerInput(Unit) { detectTapGestures(onTap = { focusManager.clearFocus() }) }
     ) {
         // Messages list

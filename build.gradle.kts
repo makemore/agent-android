@@ -13,6 +13,14 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+        // Default stub-server URL for Level C streaming UI tests. The
+        // standard Android emulator loopback maps `10.0.2.2` to the host
+        // machine, where `clients/test-stub-server/server.py` runs on
+        // port 8765. Override per-run with:
+        //   ./gradlew connectedDebugAndroidTest \
+        //     -Pandroid.testInstrumentationRunnerArguments.STUB_SERVER_URL=...
+        testInstrumentationRunnerArguments["STUB_SERVER_URL"] =
+            "http://10.0.2.2:8765"
     }
 
     buildTypes {
@@ -80,6 +88,25 @@ dependencies {
 
     // Test
     testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    // The android.jar shipped to unit tests stubs out org.json; pull in the
+    // real implementation so SSE fixture loaders can parse JSON on the JVM.
+    testImplementation("org.json:json:20231013")
+
+    // Instrumented tests (Level C streaming UI) — drive the real
+    // ChatWidgetView composable through Compose semantics against the
+    // Python stub server.
+    // Espresso 3.7.0 / runner 1.7.0 are required for API 35+ emulators —
+    // earlier releases reflect on `InputManager.getInstance()` (removed in
+    // API 34) and throw `NoSuchMethodException` from `Espresso.onIdle()`
+    // during every Compose UI test. 3.7.0 switched to `getSystemService`.
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2025.04.01"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
 

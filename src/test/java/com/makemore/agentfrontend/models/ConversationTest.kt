@@ -27,9 +27,9 @@ class ConversationTest {
             {
               "role": "tool",
               "content": "{\"ok\":true}",
-              "tool_call_id": "call_123",
+              "toolCallId": "call_123",
               "metadata": {
-                "tool_name": "get_exercise_detail",
+                "toolName": "get_exercise_detail",
                 "contentBlocks": [
                   {
                     "type": "video",
@@ -80,7 +80,7 @@ class ConversationTest {
             {
               "role": "tool",
               "content": "done",
-              "tool_call_id": "call_99",
+              "toolCallId": "call_99",
               "metadata": { "contentBlocks": [] }
             }
         """.trimIndent()

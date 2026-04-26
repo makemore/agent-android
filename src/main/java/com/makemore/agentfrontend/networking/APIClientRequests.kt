@@ -68,7 +68,7 @@ suspend fun APIClient.createRun(
     val token = getOrCreateSession()
 
     val body = JSONObject().apply {
-        put("agent_key", agentKeyOverride ?: config.agentKey)
+        put("agentKey", agentKeyOverride ?: config.agentKey)
         put("messages", JSONArray().apply {
             messages.forEach { msg ->
                 put(JSONObject().apply {
@@ -78,14 +78,14 @@ suspend fun APIClient.createRun(
         })
         val meta = JSONObject()
         config.metadata.forEach { (k, v) -> meta.put(k, v) }
-        meta.put("journey_type", config.defaultJourneyType)
+        meta.put("journeyType", config.defaultJourneyType)
         put("metadata", meta)
 
-        conversationId?.let { put("conversation_id", it) }
+        conversationId?.let { put("conversationId", it) }
         model?.let { put("model", it) }
         if (thinking) put("thinking", true)
-        supersedeFromMessageIndex?.let { put("supersede_from_message_index", it) }
-        systemVersionId?.let { put("system_version_id", it) }
+        supersedeFromMessageIndex?.let { put("supersedeFromMessageIndex", it) }
+        systemVersionId?.let { put("systemVersionId", it) }
     }
 
     val requestBody = body.toString().toRequestBody("application/json".toMediaType())

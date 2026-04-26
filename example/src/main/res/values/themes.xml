@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- A bare DayNight theme. The chat widget brings its own Material3
+         palette via Compose, so the host app just needs to keep the system
+         status/nav bars consistent with the system appearance. -->
+    <style name="Theme.AgentExample" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

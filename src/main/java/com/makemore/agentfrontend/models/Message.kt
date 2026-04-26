@@ -14,7 +14,12 @@ data class Message(
     val timestamp: Date = Date(),
     val type: MessageType = MessageType.MESSAGE,
     val metadata: MessageMetadata? = null,
-    val files: List<FileAttachment>? = null
+    val files: List<FileAttachment>? = null,
+    /** True while tokens are still streaming into this message. Views use
+     *  this to render a cheaper text renderer during the stream and swap
+     *  to full Markdown once the stream completes — avoids visible
+     *  reflow/jitter from per-token re-parsing. */
+    val isStreaming: Boolean = false,
 )
 
 /** Message role */
