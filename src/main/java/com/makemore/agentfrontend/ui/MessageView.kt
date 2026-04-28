@@ -173,10 +173,11 @@ fun MessageView(
                 }
 
                 // Debug info
-                if (showDebug && message.metadata?.arguments != null) {
+                val meta = message.metadata
+                if (showDebug && meta?.arguments != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Args: ${message.metadata.arguments}",
+                        text = "Args: ${meta.arguments}",
                         style = MaterialTheme.typography.labelSmall,
                         color = textColor.copy(alpha = 0.6f),
                         maxLines = 3,

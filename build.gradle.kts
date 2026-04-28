@@ -48,6 +48,9 @@ android {
 }
 
 dependencies {
+    // Core protocol/transport library (zero Compose deps)
+    api(project(":agent-client"))
+
     // Compose BOM
     val composeBom = platform("androidx.compose:compose-bom:2025.04.01")
     implementation(composeBom)
@@ -61,7 +64,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
 
-    // Networking
+    // Networking (needed by ViewModel directly)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // JSON
@@ -90,8 +93,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    // The android.jar shipped to unit tests stubs out org.json; pull in the
-    // real implementation so SSE fixture loaders can parse JSON on the JVM.
     testImplementation("org.json:json:20231013")
 
     // Instrumented tests (Level C streaming UI) — drive the real

@@ -23,6 +23,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "agent-frontend"
 
+// Core protocol/transport library — zero Compose dependencies.
+include(":agent-client")
+
 // Sample host app — manual scenario launcher for the chat widget. Mirrors
 // `clients/agent-ios/Example`. Open this directory in Android Studio and
 // run the `:example` configuration to launch the launcher on a device or

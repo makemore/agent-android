@@ -904,8 +904,9 @@ class ChatViewModel(
         }
 
         // Assistant messages with tool calls
-        if (m.role == "assistant" && !m.toolCalls.isNullOrEmpty()) {
-            return m.toolCalls.map { tc ->
+        val toolCalls = m.toolCalls
+        if (m.role == "assistant" && !toolCalls.isNullOrEmpty()) {
+            return toolCalls.map { tc ->
                 val name = tc.function?.name ?: tc.name ?: "tool"
                 Message(
                     role = MessageRole.ASSISTANT,
