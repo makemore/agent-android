@@ -55,6 +55,9 @@ data class ChatWidgetConfig(
      * pin-to-bottom on user submit and on initial render is unaffected.
      * Default is `true` for backwards compatibility.
      */
+    /** Ephemeral mode: conversation history stays on the client.
+     * The server only holds run data for a short pickup window. */
+    val ephemeral: Boolean = false,
     val followStreamingEnabled: Boolean = true,
     /**
      * How close to the bottom (in dp) the list must be before streaming

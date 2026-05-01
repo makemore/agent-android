@@ -111,6 +111,9 @@ class ChatViewModel(
         if (hasRestoredConversation) return
         hasRestoredConversation = true
 
+        // Ephemeral mode: nothing to restore from the server.
+        if (config.ephemeral) return
+
         conversationId.value?.let { savedId ->
             viewModelScope.launch { loadConversation(savedId) }
         }
@@ -175,7 +178,16 @@ class ChatViewModel(
         ))
 
         try {
-            val apiMessages = listOf(mapOf("role" to "user", "content" to trimmed))
+            // In ephemeral mode send the full conversation history.
+            val apiMessages: List<Map<String, Any>> = if (config.ephemeral) {
+                val history = messages
+                    .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
+                    .dropLast(1)  // the user message we just appended is re-added below
+                    .map { mapOf("role" to it.role.value, "content" to (it.content ?: "")) }
+                history + listOf(mapOf("role" to "user", "content" to trimmed))
+            } else {
+                listOf(mapOf("role" to "user", "content" to trimmed))
+            }
 
             val run = apiClient.createRun(
                 conversationId = conversationId.value,
@@ -184,7 +196,8 @@ class ChatViewModel(
                 thinking = thinking,
                 supersedeFromMessageIndex = supersedeFromMessageIndex,
                 agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
-                systemVersionId = selectedSystemVersionId.value
+                systemVersionId = selectedSystemVersionId.value,
+                ephemeral = config.ephemeral
             )
 
             currentRunId = run.id
@@ -312,6 +325,12 @@ class ChatViewModel(
 
     /** Load a specific conversation */
     fun loadConversation(convId: String) {
+        // Ephemeral mode: conversation is local-only, nothing to fetch.
+        if (config.ephemeral) {
+            conversationId.value = convId
+            return
+        }
+
         viewModelScope.launch {
             isLoading.value = true
             messages.clear()
