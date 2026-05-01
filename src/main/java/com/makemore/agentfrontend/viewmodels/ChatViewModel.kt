@@ -9,10 +9,12 @@ import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
 import com.makemore.agentfrontend.services.StorageService
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -787,12 +789,20 @@ class ChatViewModel(
 
     // -- Stream buffer helpers --
 
-    /** Start the drain loop if it isn't already running. */
+    /**
+     * Start the drain loop if it isn't already running.
+     * The delay runs on [Dispatchers.Default] so its timing isn't affected
+     * by main-thread contention during scroll gestures (Choreographer frame
+     * callbacks can starve Handler.postDelayed-based coroutine resumptions
+     * while the user is actively touch-scrolling). The actual state mutation
+     * ([drainTick]) switches back to [Dispatchers.Main] automatically because
+     * [viewModelScope] is Main-confined.
+     */
     private fun startDrainTimerIfNeeded() {
         if (drainJob != null) return
         drainJob = viewModelScope.launch {
             while (isActive) {
-                delay(drainIntervalMs)
+                withContext(Dispatchers.Default) { delay(drainIntervalMs) }
                 if (!drainTick()) break
             }
         }
