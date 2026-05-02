@@ -99,6 +99,16 @@ class ChatViewModel(
      *  gated by [isLoading]. */
     private var streamCompletion: CompletableDeferred<Unit>? = null
 
+    // -- Ephemeral Memories --
+    // Client-side memories (facts/preferences) persisted locally and
+    // sent to the server with each ephemeral run. Updated via the
+    // `memory.update` SSE event.
+    private var clientMemories: MutableList<Map<String, String>> = mutableListOf()
+
+    companion object {
+        private const val MEMORIES_STORAGE_KEY = "chat_widget_memories"
+    }
+
     init {
         // Load saved conversation ID
         storage.get(config.conversationIdKey)?.let { conversationId.value = it }
@@ -106,6 +116,19 @@ class ChatViewModel(
         storage.get(config.systemKey)?.let { selectedSystemSlug.value = it }
         storage.get(config.systemVersionKey)?.let { selectedSystemVersion.value = it }
         storage.get(config.systemVersionIdKey)?.let { selectedSystemVersionId.value = it }
+
+        // Load persisted client-side memories (ephemeral mode)
+        storage.get(MEMORIES_STORAGE_KEY)?.let { json ->
+            try {
+                val parsed = org.json.JSONArray(json)
+                for (i in 0 until parsed.length()) {
+                    val obj = parsed.getJSONObject(i)
+                    val entry = mutableMapOf<String, String>()
+                    obj.keys().forEach { key -> entry[key] = obj.getString(key) }
+                    clientMemories.add(entry)
+                }
+            } catch (_: Exception) { /* corrupted — start fresh */ }
+        }
     }
 
     /** Restore the saved conversation on launch */
@@ -199,7 +222,8 @@ class ChatViewModel(
                 supersedeFromMessageIndex = supersedeFromMessageIndex,
                 agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
                 systemVersionId = selectedSystemVersionId.value,
-                ephemeral = config.ephemeral
+                ephemeral = config.ephemeral,
+                memories = if (config.ephemeral) clientMemories else null
             )
 
             currentRunId = run.id
@@ -487,6 +511,7 @@ class ChatViewModel(
             "sub_agent.end" -> handleSubAgentEnd(payload)
             "content.blocks" -> handleContentBlocks(payload)
             "custom" -> handleCustomEvent(payload)
+            "memory.update" -> handleMemoryUpdate(payload)
             "run.succeeded", "run.failed", "run.cancelled", "run.timed_out" -> handleTerminalEvent(event.type, payload)
         }
     }
@@ -757,6 +782,40 @@ class ChatViewModel(
                 )
             ))
         }
+    }
+
+    /**
+     * Handle a `memory.update` event — the server extracted memories from
+     * the conversation and is sending them back for client-side persistence.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun handleMemoryUpdate(payload: Map<String, Any?>) {
+        val memoriesArray = payload["memories"] as? List<Map<String, Any?>> ?: return
+
+        for (mem in memoriesArray) {
+            val key = mem["key"] as? String ?: continue
+            val action = mem["action"] as? String ?: "upsert"
+
+            if (action == "delete") {
+                clientMemories.removeAll { it["key"] == key }
+            } else {
+                // Upsert: remove old entry with same key, then append
+                clientMemories.removeAll { it["key"] == key }
+                val entry = mutableMapOf("key" to key)
+                (mem["value"] as? String)?.let { entry["value"] = it }
+                (mem["type"] as? String)?.let { entry["type"] = it }
+                clientMemories.add(entry)
+            }
+        }
+
+        // Persist to local storage
+        val jsonArray = org.json.JSONArray()
+        for (entry in clientMemories) {
+            val obj = org.json.JSONObject()
+            entry.forEach { (k, v) -> obj.put(k, v) }
+            jsonArray.put(obj)
+        }
+        storage.set(MEMORIES_STORAGE_KEY, jsonArray.toString())
     }
 
     private fun handleTerminalEvent(type: String, payload: Map<String, Any?>) {

@@ -64,7 +64,8 @@ suspend fun APIClient.createRun(
     supersedeFromMessageIndex: Int? = null,
     agentKeyOverride: String? = null,
     systemVersionId: String? = null,
-    ephemeral: Boolean = false
+    ephemeral: Boolean = false,
+    memories: List<Map<String, String>>? = null
 ): AgentRun = withContext(Dispatchers.IO) {
     val token = getOrCreateSession()
 
@@ -88,6 +89,15 @@ suspend fun APIClient.createRun(
         supersedeFromMessageIndex?.let { put("supersedeFromMessageIndex", it) }
         systemVersionId?.let { put("systemVersionId", it) }
         if (ephemeral) put("ephemeral", true)
+        if (!memories.isNullOrEmpty()) {
+            put("memories", JSONArray().apply {
+                memories.forEach { mem ->
+                    put(JSONObject().apply {
+                        mem.forEach { (k, v) -> put(k, v) }
+                    })
+                }
+            })
+        }
     }
 
     val requestBody = body.toString().toRequestBody("application/json".toMediaType())
