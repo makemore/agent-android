@@ -1,5 +1,6 @@
 package com.makemore.agentfrontend.viewmodels
 
+import android.content.Context
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
@@ -7,6 +8,10 @@ import androidx.lifecycle.viewModelScope
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
+import com.makemore.agentfrontend.services.LocalConversation
+import com.makemore.agentfrontend.services.LocalConversationSummary
+import com.makemore.agentfrontend.services.LocalHistoryStore
+import com.makemore.agentfrontend.services.LocalMessage
 import com.makemore.agentfrontend.services.StorageService
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -33,7 +38,8 @@ import java.util.Date
 class ChatViewModel(
     private val config: ChatWidgetConfig,
     private val apiClient: APIClient,
-    private val storage: StorageService
+    private val storage: StorageService,
+    private val context: Context? = null
 ) : ViewModel() {
 
     // -- Observable State --
@@ -105,13 +111,25 @@ class ChatViewModel(
     // `memory.update` SSE event.
     private var clientMemories: MutableList<Map<String, String>> = mutableListOf()
 
+    // -- Local History (ephemeral mode) --
+    /** Observable list of locally-persisted conversations (newest first). */
+    val localConversations = mutableStateListOf<LocalConversationSummary>()
+    private var localHistoryStore: LocalHistoryStore? = null
+    private var localConversationCreatedAt: Long? = null
+
     companion object {
         private const val MEMORIES_STORAGE_KEY = "chat_widget_memories"
     }
 
     init {
-        // Load saved conversation ID
-        storage.get(config.conversationIdKey)?.let { conversationId.value = it }
+        // Load saved conversation ID — server-side mode only.
+        // In ephemeral mode the conversationIdKey slot holds a stale
+        // server id that the user has no way to resume; rehydrating it
+        // causes createRun to 404. Local conversations are loaded via
+        // loadLocalConversation(id) instead.
+        if (!config.ephemeral) {
+            storage.get(config.conversationIdKey)?.let { conversationId.value = it }
+        }
         // Load saved system selection
         storage.get(config.systemKey)?.let { selectedSystemSlug.value = it }
         storage.get(config.systemVersionKey)?.let { selectedSystemVersion.value = it }
@@ -128,6 +146,13 @@ class ChatViewModel(
                     clientMemories.add(entry)
                 }
             } catch (_: Exception) { /* corrupted — start fresh */ }
+        }
+
+        // Initialise local history store for ephemeral mode
+        if (config.ephemeral && context != null) {
+            val store = LocalHistoryStore(context.applicationContext, config.agentKey)
+            localHistoryStore = store
+            localConversations.addAll(store.loadIndex())
         }
     }
 
@@ -232,6 +257,7 @@ class ChatViewModel(
             if (conversationId.value == null && run.conversationId != null) {
                 conversationId.value = run.conversationId
                 storage.set(config.conversationIdKey, run.conversationId)
+                if (config.ephemeral) localConversationCreatedAt = System.currentTimeMillis()
             }
 
             // Subscribe to SSE events and suspend until the stream
@@ -280,14 +306,58 @@ class ChatViewModel(
         }
     }
 
-    /** Clear all messages and start fresh */
+    /** Clear all messages and start fresh.
+     *  Does NOT delete the conversation from local storage — it just
+     *  starts a new in-memory conversation. */
     fun clearMessages() {
         messages.clear()
         conversationId.value = null
+        localConversationCreatedAt = null
         error.value = null
         hasMoreMessages.value = false
         messagesOffset = 0
         storage.set(config.conversationIdKey, null)
+    }
+
+    // -- Local History (ephemeral mode) --
+
+    /** Returns the list of locally-persisted conversations (newest first). */
+    fun loadLocalConversations(): List<LocalConversationSummary> {
+        val store = localHistoryStore ?: return emptyList()
+        val list = store.loadIndex()
+        localConversations.clear()
+        localConversations.addAll(list)
+        return list
+    }
+
+    /** Hydrates the VM with a locally-persisted conversation.
+     *  Returns true if the conversation was found and loaded. */
+    fun loadLocalConversation(id: String): Boolean {
+        val store = localHistoryStore ?: return false
+        val conv = store.load(id) ?: return false
+        messages.clear()
+        messages.addAll(conv.messages.map { it.toMessage() })
+        conversationId.value = id
+        localConversationCreatedAt = conv.createdAt
+        storage.set(config.conversationIdKey, id)
+        hasMoreMessages.value = false
+        messagesOffset = 0
+        error.value = null
+        return true
+    }
+
+    /** Delete a single locally-persisted conversation. */
+    fun deleteLocalConversation(id: String) {
+        localHistoryStore?.delete(id)
+        localConversations.clear()
+        localConversations.addAll(localHistoryStore?.loadIndex() ?: emptyList())
+        if (conversationId.value == id) clearMessages()
+    }
+
+    /** Purge all locally-persisted conversations for this agent. */
+    fun purgeLocalHistory() {
+        localHistoryStore?.purgeAll()
+        localConversations.clear()
     }
 
     // -- System Selection --
@@ -844,6 +914,40 @@ class ChatViewModel(
         sseClient?.disconnect()
         sseClient = null
         currentRunId = null
+
+        // Persist to local history store (ephemeral mode)
+        persistToLocalHistory()
+    }
+
+    /** Save the current conversation to the local history store. */
+    private fun persistToLocalHistory() {
+        if (!config.ephemeral) return
+        val store = localHistoryStore ?: return
+        val convId = conversationId.value ?: return
+        if (messages.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        val title = deriveConversationTitle()
+        val localMsgs = messages.map { LocalMessage(it) }
+        val conv = LocalConversation(
+            id = convId,
+            title = title,
+            createdAt = localConversationCreatedAt ?: now,
+            updatedAt = now,
+            messages = localMsgs
+        )
+        store.upsert(conv)
+        localConversations.clear()
+        localConversations.addAll(store.loadIndex())
+    }
+
+    /** Derive a title for the conversation from the first user message. */
+    private fun deriveConversationTitle(): String {
+        val firstUser = messages.firstOrNull { it.role == MessageRole.USER }
+            ?: return "Untitled conversation"
+        val collapsed = firstUser.content.trim().replace(Regex("\\s+"), " ")
+        if (collapsed.isEmpty()) return "Untitled conversation"
+        return if (collapsed.length <= 60) collapsed else collapsed.take(60) + "…"
     }
 
     // -- Stream buffer helpers --
