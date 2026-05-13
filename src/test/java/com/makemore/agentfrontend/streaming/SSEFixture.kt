@@ -27,9 +27,10 @@ data class SSEFixture(
         events.forEachIndexed { seq, ev ->
             val type = ev.getString("event")
             val payload = ev.optJSONObject("payload") ?: JSONObject()
+            val eventSeq = if (ev.has("seq_override")) ev.getInt("seq_override") else seq
             val envelope = JSONObject().apply {
                 put("run_id", runId)
-                put("seq", seq)
+                put("seq", eventSeq)
                 put("type", type)
                 put("payload", payload)
                 put("ts", ts)
@@ -45,7 +46,7 @@ data class SSEFixture(
 
     companion object {
         fun load(name: String): SSEFixture {
-            val dir = locateFixturesDir()
+            val dir = locateFixturesDir(name)
             val file = File(dir, "$name.json")
             require(file.exists()) { "Fixture not found: ${file.absolutePath}" }
             val raw = JSONObject(file.readText())
@@ -59,16 +60,16 @@ data class SSEFixture(
             )
         }
 
-        private fun locateFixturesDir(): File {
+        private fun locateFixturesDir(fixtureName: String): File {
             // Walk up from cwd until we find `clients/test-fixtures/sse`,
             // or directly find `test-fixtures/sse` (when cwd is `clients/`).
             var dir: File? = File("").absoluteFile
             repeat(10) {
                 val cur = dir ?: return@repeat
                 val direct = File(cur, "clients/test-fixtures/sse")
-                if (direct.isDirectory) return direct
+                if (File(direct, "$fixtureName.json").isFile) return direct
                 val sibling = File(cur, "test-fixtures/sse")
-                if (sibling.isDirectory) return sibling
+                if (File(sibling, "$fixtureName.json").isFile) return sibling
                 dir = cur.parentFile
             }
             error("Could not locate clients/test-fixtures/sse from ${File("").absolutePath}")

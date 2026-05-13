@@ -13,7 +13,9 @@ The Gradle project exposes:
 
 `ChatViewModel.runState` exposes the canonical lifecycle: `IDLE`, `SENDING`, `STREAMING`, `WAITING`, `CANCELLING`, `CANCELLED`, `FAILED`, `SUCCEEDED`. `WAITING` is used for `run.suspended` and `client.action.required` so mobile UI does not remain stuck in a loading state.
 
-Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. The shared backend contract is documented in `agent/docs/mobile-protocol-contract.md`.
+Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. `AgentStreamEvent` and `AgentRunReducerState` provide headless typed parsing/reducer primitives for custom clients that do not want the bundled `ChatViewModel`. The shared backend contract is documented in `agent/docs/mobile-protocol-contract.md`.
+
+The library boundary is intentionally generic: `agent-client` owns agent stream events, SSE lifecycle, reducer state, tool/required-action semantics, fixtures, and tests. Host products own navigation, push notifications, integrations UI, branding, terminal sessions, and app-specific persistence.
 
 ## Installation
 
