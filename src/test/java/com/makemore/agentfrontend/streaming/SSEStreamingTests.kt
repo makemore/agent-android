@@ -188,6 +188,22 @@ class SSEStreamingTests {
         )
     }
 
+    @Test
+    fun requiredActionRendersWaitingState() = runTest {
+        val fixture = SSEFixture.load("required_action")
+        installDispatcher(fixture)
+
+        val vm = ChatViewModel(config, apiClient, storage)
+        vm.sendMessage("Check my calendar")
+        waitForStreamSettled(vm)
+
+        assertEquals(RunState.WAITING, vm.runState.value)
+        val action = vm.messages.firstOrNull { it.type == MessageType.REQUIRED_ACTION }
+        assertNotNull("expected required action message: ${dumpMessages(vm)}", action)
+        assertEquals("oauth", action!!.metadata?.actionType)
+        assertEquals("Connect", action.metadata?.actionLabel)
+    }
+
     // -- Helpers --
 
     /** Wire MockWebServer to satisfy the three endpoints this flow hits. */

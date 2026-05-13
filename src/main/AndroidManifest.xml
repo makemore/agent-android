@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required for the SpeechRecognizer mic button in InputView. The
+         permission is requested at runtime; this declaration is what
+         enables Android 6.0+'s permission dialog to appear at all. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Allows the app to query the on-device SpeechRecognizer service
+         on Android 11+ where package visibility is restricted. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 </manifest>
 

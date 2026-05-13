@@ -39,7 +39,22 @@ data class APIPaths(
     val systems: String = "/api/agent-runtime/systems/",
 
     /** Agents discovery endpoint */
-    val agents: String = "/api/agent-runtime/agents/"
+    val agents: String = "/api/agent-runtime/agents/",
+
+    /**
+     * Voice token mint endpoint (django_agent_runtime.voice).
+     * Set to `null` to disable ElevenLabs and fall back to native TTS.
+     */
+    val voiceToken: String? = "/api/agent-runtime/voice/token/",
+
+    /**
+     * Voice TTS streaming endpoint. Returned by the token mint response,
+     * but kept here as a default so callers can pre-resolve it.
+     */
+    val voiceTts: String? = "/api/agent-runtime/voice/tts/",
+
+    /** Voice catalogue endpoint. */
+    val voiceVoices: String? = "/api/agent-runtime/voice/voices/"
 ) {
     /** Get the run events URL with the run ID substituted */
     fun runEventsUrl(runId: String): String =

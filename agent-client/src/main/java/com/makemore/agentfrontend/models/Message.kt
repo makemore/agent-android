@@ -42,6 +42,7 @@ enum class MessageType(val value: String) {
     TOOL_RESULT("tool_result"),
     ERROR("error"),
     CANCELLED("cancelled"),
+    REQUIRED_ACTION("required_action"),
     SUB_AGENT_START("sub_agent_start"),
     SUB_AGENT_END("sub_agent_end"),
     AGENT_CONTEXT("agent_context"),
@@ -50,6 +51,27 @@ enum class MessageType(val value: String) {
     companion object {
         fun fromValue(value: String): MessageType =
             entries.firstOrNull { it.value == value } ?: MESSAGE
+    }
+}
+
+/** Generic lifecycle state for a single run. */
+enum class RunState(val value: String) {
+    IDLE("idle"),
+    SENDING("sending"),
+    STREAMING("streaming"),
+    WAITING("waiting"),
+    CANCELLING("cancelling"),
+    CANCELLED("cancelled"),
+    FAILED("failed"),
+    SUCCEEDED("succeeded");
+
+    fun apply(eventType: String): RunState = when (eventType) {
+        "run.started", "assistant.delta", "assistant.message", "tool.call", "tool.result", "content.blocks" -> STREAMING
+        "run.suspended", "client.action.required" -> WAITING
+        "run.cancelled" -> CANCELLED
+        "run.failed", "run.timed_out" -> FAILED
+        "run.succeeded" -> SUCCEEDED
+        else -> this
     }
 }
 
@@ -62,7 +84,12 @@ data class MessageMetadata(
     val subAgentKey: String? = null,
     val agentName: String? = null,
     val invocationMode: String? = null,
-    val contentBlocks: List<ContentBlock>? = null
+    val contentBlocks: List<ContentBlock>? = null,
+    val actionId: String? = null,
+    val actionType: String? = null,
+    val actionUrl: String? = null,
+    val actionLabel: String? = null,
+    val resumeHint: Any? = null
 )
 
 /** File attachment */

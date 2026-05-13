@@ -1,15 +1,27 @@
 package com.makemore.agentfrontend.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
+import com.makemore.agentfrontend.voice.VoiceController
+import com.makemore.agentfrontend.voice.VoiceFactory
 
 /**
  * Main chat widget composable — provides the chat flow (messages, error banner, input).
@@ -20,9 +32,32 @@ import com.makemore.agentfrontend.viewmodels.ChatViewModel
 fun ChatWidgetView(
     viewModel: ChatViewModel,
     config: ChatWidgetConfig,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    voiceController: VoiceController? = null,
 ) {
     var showSystemPicker by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Build the controller lazily on first composition. Host apps that
+    // need a custom provider pass one in via [voiceController]. The
+    // controller mirrors `config.enableTTS` so the button toggles cleanly.
+    val controller = remember(viewModel, config) {
+        voiceController ?: VoiceFactory.makeController(
+            context = context,
+            config = config,
+            apiClient = viewModel.apiClient,
+        )
+    }
+
+    // Bind to the viewModel so SSE deltas flow into TTS playback. Tear
+    // down the native engine when the composable leaves the tree.
+    DisposableEffect(controller) {
+        viewModel.voiceController = controller
+        onDispose {
+            viewModel.voiceController = null
+            controller.dispose()
+        }
+    }
 
     // Restore conversation on first composition
     LaunchedEffect(Unit) {
@@ -65,11 +100,13 @@ fun ChatWidgetView(
             )
         }
 
-        // System picker button
-        if (config.showSystemPicker) {
-            SystemPickerButton(
+        // System picker / TTS toggle row — bottom-right, above input.
+        if (config.showSystemPicker || config.showTTSButton) {
+            SystemAndVoiceRow(
                 viewModel = viewModel,
-                onShowPicker = { showSystemPicker = true }
+                config = config,
+                voiceController = controller,
+                onShowPicker = { showSystemPicker = true },
             )
         }
 
@@ -77,6 +114,8 @@ fun ChatWidgetView(
         InputView(
             config = config,
             isLoading = viewModel.isLoading.value,
+            isAgentSpeaking = controller.isSpeaking.value,
+            voiceController = controller,
             onSend = { content, files ->
                 viewModel.sendMessage(content, files)
             },
@@ -123,9 +162,11 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun SystemPickerButton(
+private fun SystemAndVoiceRow(
     viewModel: ChatViewModel,
-    onShowPicker: () -> Unit
+    config: ChatWidgetConfig,
+    voiceController: VoiceController,
+    onShowPicker: () -> Unit,
 ) {
     val slug = viewModel.selectedSystemSlug.value
     val system = slug?.let { s -> viewModel.systems.firstOrNull { it.slug == s } }
@@ -134,19 +175,67 @@ private fun SystemPickerButton(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            system?.let {
-                Text(it.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                it.activeVersion?.let { v ->
-                    Text("v$v", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+        if (config.showSystemPicker) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                system?.let {
+                    Text(it.name, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    it.activeVersion?.let { v ->
+                        Text("v$v", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
+                    }
                 }
             }
         }
         Spacer(modifier = Modifier.weight(1f))
-        IconButton(onClick = onShowPicker, modifier = Modifier.size(32.dp)) {
-            Text("⚙️")
+
+        // TTS toggle: speaker icon, fills/animates while playback is
+        // active. Tapping toggles `isEnabled` on the controller —
+        // disabling cuts off any in-flight audio so the user isn't
+        // trapped listening to the rest.
+        if (config.showTTSButton) {
+            VoiceToggleButton(
+                controller = voiceController,
+                primaryColor = config.primaryColor,
+            )
+            Spacer(modifier = Modifier.size(8.dp))
+        }
+
+        if (config.showSystemPicker) {
+            IconButton(onClick = onShowPicker, modifier = Modifier.size(36.dp)) {
+                Text("⚙️")
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoiceToggleButton(
+    controller: VoiceController,
+    primaryColor: Color,
+) {
+    val enabled = controller.isEnabled.value
+    val speaking = controller.isSpeaking.value
+    val tint = if (enabled) primaryColor else MaterialTheme.colorScheme.onSurfaceVariant
+    val description = if (enabled) "Disable voice output" else "Enable voice output"
+
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center,
+    ) {
+        IconButton(
+            onClick = { controller.setEnabled(!enabled) },
+            modifier = Modifier.size(36.dp),
+        ) {
+            val icon = when {
+                !enabled -> Icons.AutoMirrored.Filled.VolumeOff
+                speaking -> Icons.Filled.GraphicEq
+                else -> Icons.AutoMirrored.Filled.VolumeUp
+            }
+            Icon(imageVector = icon, contentDescription = description, tint = tint)
         }
     }
 }

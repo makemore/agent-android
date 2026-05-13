@@ -172,6 +172,17 @@ fun MessageView(
                     )
                 }
 
+                if (message.type == MessageType.REQUIRED_ACTION) {
+                    message.metadata?.actionLabel?.let { label ->
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = label,
+                            color = config.primaryColor,
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+
                 // Debug info
                 val meta = message.metadata
                 if (showDebug && meta?.arguments != null) {
@@ -238,6 +249,7 @@ private fun MessageIcon(message: Message) {
             else Icons.Default.CheckCircle to Color(0xFF4CAF50)
         MessageType.ERROR -> Icons.Default.Warning to Color.Red
         MessageType.CANCELLED -> Icons.Default.StopCircle to Color(0xFFFF9800)
+        MessageType.REQUIRED_ACTION -> Icons.Default.Info to Color(0xFF2196F3)
         MessageType.SUB_AGENT_START, MessageType.SUB_AGENT_END, MessageType.AGENT_CONTEXT ->
             Icons.Default.Link to Color(0xFF2196F3)
         else -> return

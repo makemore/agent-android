@@ -137,7 +137,7 @@ suspend fun APIClient.cancelRun(id: String): Unit = withContext(Dispatchers.IO) 
     val request = buildRequest(path, "POST", token = token)
 
     val response = httpClient.newCall(request).await()
-    if (response.code != 200) throw CancelFailed
+    if (response.code !in 200..204) throw CancelFailed
 }
 
 // -- Systems Discovery --

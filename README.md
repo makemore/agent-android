@@ -4,6 +4,17 @@ A Jetpack Compose chat widget library for AI agents. Android equivalent of [`age
 
 **Requires:** Android API 26+ (Android 8.0) · Kotlin 2.1 · JDK 17 · Compose BOM 2025.04
 
+## Headless/API surface and reusable primitives
+
+The Gradle project exposes:
+
+- `:agent-client`: product-neutral models, auth, API client, SSE transport, local history, pagination, cancellation, and voice helpers.
+- `:agent-frontend`: reusable Compose primitives plus the bundled widget. Host apps can reuse `MessageListView`, `MessageView`, `InputView`, `ContentBlockViews`, `TaskListView`, and `SystemPickerView` directly inside their own shell.
+
+`ChatViewModel.runState` exposes the canonical lifecycle: `IDLE`, `SENDING`, `STREAMING`, `WAITING`, `CANCELLING`, `CANCELLED`, `FAILED`, `SUCCEEDED`. `WAITING` is used for `run.suspended` and `client.action.required` so mobile UI does not remain stuck in a loading state.
+
+Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. The shared backend contract is documented in `agent/docs/mobile-protocol-contract.md`.
+
 ## Installation
 
 ### Local Gradle subproject (recommended for development)
@@ -104,6 +115,17 @@ val config = ChatWidgetConfig(
 | `AuthStrategy.SESSION`   | Cookie-based session auth            |
 | `AuthStrategy.ANONYMOUS` | Auto-fetched anonymous session token |
 | `AuthStrategy.NONE`      | No authentication                    |
+
+## Voice (Live Mic)
+
+When `enableVoice = true` and `enableTTS = true`, the input row exposes a "Live Mic" experience matching `agent-ios`:
+
+- **Always-on mic** — tap the mic once to enable; it stays live across submits and through agent playback. Tap again to fully stop. Internally `SpeechRecognizer` is recycled on every result/error so its single-shot model still feels continuous.
+- **Auto-send (hands-free)** — when the auto-renew icon next to the mic is on (default), 3 s of silence after the last partial auto-submits the text and re-engages the mic after the agent finishes speaking. The toggle persists across launches via `SharedPreferences`.
+- **Barge-in** — while the agent is speaking the recognizer runs in *monitor* mode: partials are not written to the input field but diffed against `VoiceController.recentSpokenText` (the rolling buffer of text recently queued for TTS). A partial containing two or more words *not* in the agent's recently-spoken text triggers `VoiceController.stop()`, interrupting playback. Hardware AEC plus the leak-back filter keep self-interruption rare.
+- **Manual stop** — the send button becomes a Stop button while the agent is speaking, so the user can always interrupt by tapping.
+
+The `RECORD_AUDIO` permission is requested at runtime on first mic tap; the manifest entry is provided by the library.
 
 ## Custom ViewModel (Advanced)
 

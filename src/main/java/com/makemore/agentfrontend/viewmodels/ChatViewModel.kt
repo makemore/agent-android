@@ -13,6 +13,8 @@ import com.makemore.agentfrontend.services.LocalConversationSummary
 import com.makemore.agentfrontend.services.LocalHistoryStore
 import com.makemore.agentfrontend.services.LocalMessage
 import com.makemore.agentfrontend.services.StorageService
+import com.makemore.agentfrontend.voice.Emotion
+import com.makemore.agentfrontend.voice.VoiceController
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,7 +39,7 @@ import java.util.Date
  */
 class ChatViewModel(
     private val config: ChatWidgetConfig,
-    private val apiClient: APIClient,
+    val apiClient: APIClient,
     private val storage: StorageService,
     private val context: Context? = null
 ) : ViewModel() {
@@ -49,6 +51,7 @@ class ChatViewModel(
     val conversationId = mutableStateOf<String?>(null)
     val hasMoreMessages = mutableStateOf(false)
     val loadingMoreMessages = mutableStateOf(false)
+    val runState = mutableStateOf(RunState.IDLE)
 
     // -- System State --
     val systems = mutableStateListOf<AgentSystem>()
@@ -93,6 +96,13 @@ class ChatViewModel(
     /** Once the parent's stream diverges from the snapshot we stop
      *  comparing and treat subsequent deltas as a normal stream. */
     private var pendingEchoDiverged: Boolean = false
+
+    // -- Voice (TTS) --
+    /** Optional voice controller. When set, `assistant.delta` and
+     *  `assistant.message` events are streamed into it for sentence-level
+     *  TTS playback. Owned by the host UI so its lifecycle matches the
+     *  composable / activity rather than the view model. */
+    var voiceController: VoiceController? = null
 
     // -- Stream completion awaiter --
     /** Resolved when the in-flight SSE stream reaches a terminal state
@@ -218,7 +228,12 @@ class ChatViewModel(
         if (trimmed.isEmpty() || isLoading.value) return
 
         isLoading.value = true
+        runState.value = RunState.SENDING
         error.value = null
+
+        // New turn — drop any half-spoken audio from the previous assistant
+        // response and clear the chunker's buffer.
+        voiceController?.reset()
 
         // Add user message
         messages.add(Message(
@@ -252,6 +267,7 @@ class ChatViewModel(
             )
 
             currentRunId = run.id
+            runState.value = RunState.STREAMING
 
             // Update conversation ID if new
             if (conversationId.value == null && run.conversationId != null) {
@@ -267,6 +283,7 @@ class ChatViewModel(
         } catch (e: Exception) {
             error.value = e.message
             isLoading.value = false
+            runState.value = RunState.FAILED
             resolveStreamCompletion()
         }
     }
@@ -278,6 +295,7 @@ class ChatViewModel(
 
         viewModelScope.launch {
             try {
+                runState.value = RunState.CANCELLING
                 apiClient.cancelRun(runId)
                 sseClient?.disconnect()
                 sseClient = null
@@ -288,7 +306,10 @@ class ChatViewModel(
                 // differs from the natural-end path (`handleTerminalEvent`) which
                 // deliberately lets the drain finish smoothly.
                 resetStreamBuffer()
+                // Cut off any in-flight TTS playback when the user cancels.
+                voiceController?.stop()
                 isLoading.value = false
+                runState.value = RunState.CANCELLED
                 currentRunId = null
 
                 messages.add(Message(
@@ -316,6 +337,7 @@ class ChatViewModel(
         error.value = null
         hasMoreMessages.value = false
         messagesOffset = 0
+        runState.value = RunState.IDLE
         storage.set(config.conversationIdKey, null)
     }
 
@@ -571,6 +593,7 @@ class ChatViewModel(
         val payload = json["payload"] as? Map<String, Any?> ?: return
 
         config.onEvent?.invoke(event.type, payload)
+        runState.value = runState.value.apply(event.type)
 
         when (event.type) {
             "assistant.delta" -> handleAssistantDelta(payload)
@@ -582,6 +605,7 @@ class ChatViewModel(
             "content.blocks" -> handleContentBlocks(payload)
             "custom" -> handleCustomEvent(payload)
             "memory.update" -> handleMemoryUpdate(payload)
+            "client.action.required", "run.suspended" -> handleRequiredAction(payload)
             "run.succeeded", "run.failed", "run.cancelled", "run.timed_out" -> handleTerminalEvent(event.type, payload)
         }
     }
@@ -593,6 +617,9 @@ class ChatViewModel(
         // `assistant.message` has already been applied. A new turn is
         // signalled by any non-streaming event, which resets `turnFinalized`.
         if (turnFinalized) return
+
+        // Per-delta emotion overrides the turn-level value when present.
+        val emotion = Emotion.from(payload["emotion"])
 
         // Sub-agent echo suppression: if a sub-agent just finished, buffer
         // parent deltas silently while they still match the snapshot as a
@@ -616,6 +643,7 @@ class ChatViewModel(
             assistantContent = ""
             resetStreamBuffer()
             streamBuffer.append(replay)
+            voiceController?.pushDelta(replay, emotion)
             startDrainTimerIfNeeded()
             return
         }
@@ -640,6 +668,7 @@ class ChatViewModel(
         }
 
         streamBuffer.append(delta)
+        voiceController?.pushDelta(delta, emotion)
         startDrainTimerIfNeeded()
     }
 
@@ -656,6 +685,17 @@ class ChatViewModel(
         // is done" signal. Any `assistant.delta` that arrives later must be
         // dropped to avoid a second typewriter bubble.
         turnFinalized = true
+
+        // Voice: if the run streamed deltas the chunker has been fed
+        // throughout — `finishTurn(finalText = null)` flushes the trailing
+        // fragment. If it didn't (non-streaming run), pass `content` so
+        // the user still hears the reply.
+        val voiceEmotion = Emotion.from(payload["emotion"])
+        val needsFallbackText = streamBuffer.isEmpty() && drainJob == null
+        voiceController?.finishTurn(
+            finalText = if (needsFallbackText) content else null,
+            emotion = voiceEmotion,
+        )
 
         // Sub-agent echo resolution. If we were still comparing the parent's
         // stream against a sub-agent snapshot when the final message lands,
@@ -741,7 +781,7 @@ class ChatViewModel(
     private fun handleToolCall(payload: Map<String, Any?>) {
         closeStreamingSession()
         clearPendingEcho()
-        val name = payload["name"] as? String ?: "tool"
+        val name = payload["name"] as? String ?: payload["tool_name"] as? String ?: "tool"
         messages.add(Message(
             id = "tool-call-${System.currentTimeMillis()}",
             role = MessageRole.ASSISTANT,
@@ -749,8 +789,8 @@ class ChatViewModel(
             type = MessageType.TOOL_CALL,
             metadata = MessageMetadata(
                 toolName = name,
-                toolCallId = payload["id"] as? String,
-                arguments = payload["arguments"] as? String
+                toolCallId = payload["id"] as? String ?: payload["tool_call_id"] as? String,
+                arguments = stringifyPayload(payload["arguments"] ?: payload["tool_args"])
             )
         ))
     }
@@ -768,11 +808,21 @@ class ChatViewModel(
             content = content,
             type = MessageType.TOOL_RESULT,
             metadata = MessageMetadata(
-                toolName = payload["name"] as? String,
-                toolCallId = payload["tool_call_id"] as? String,
+                toolName = payload["name"] as? String ?: payload["tool_name"] as? String,
+                toolCallId = payload["tool_call_id"] as? String ?: payload["id"] as? String,
                 result = result
             )
         ))
+    }
+
+    private fun stringifyPayload(value: Any?): String? {
+        return when (value) {
+            null -> null
+            is String -> value
+            is Map<*, *> -> org.json.JSONObject(value).toString()
+            is List<*> -> org.json.JSONArray(value).toString()
+            else -> value.toString()
+        }
     }
 
     private fun handleSubAgentStart(payload: Map<String, Any?>) {
@@ -837,6 +887,44 @@ class ChatViewModel(
         ))
     }
 
+    @Suppress("UNCHECKED_CAST")
+    private fun handleRequiredAction(payload: Map<String, Any?>) {
+        closeStreamingSession()
+        clearPendingEcho()
+        voiceController?.stop()
+
+        val action = payload["required_action"] as? Map<String, Any?> ?: payload
+        val title = action["title"] as? String ?: "Action required"
+        val message = action["message"] as? String ?: "Please complete the requested action to continue."
+        val actionId = action["action_id"] as? String
+        val alreadyRendered = actionId != null && messages.any {
+            it.type == MessageType.REQUIRED_ACTION && it.metadata?.actionId == actionId
+        }
+        if (!alreadyRendered) {
+            messages.add(Message(
+                id = "required-action-${System.currentTimeMillis()}",
+                role = MessageRole.SYSTEM,
+                content = message,
+                type = MessageType.REQUIRED_ACTION,
+                metadata = MessageMetadata(
+                    actionId = actionId,
+                    actionType = action["action_type"] as? String,
+                    actionUrl = action["action_url"] as? String,
+                    actionLabel = action["action_label"] as? String ?: title,
+                    resumeHint = action["resume_hint"]
+                )
+            ))
+        }
+
+        isLoading.value = false
+        sseClient?.disconnect()
+        sseClient = null
+        currentRunId = null
+        runState.value = RunState.WAITING
+        resolveStreamCompletion()
+        persistToLocalHistory()
+    }
+
     private fun handleCustomEvent(payload: Map<String, Any?>) {
         closeStreamingSession()
         if (payload["type"] == "agent_context") {
@@ -894,6 +982,9 @@ class ChatViewModel(
             // or let subsequent text overwrite it.
             closeStreamingSession()
             clearPendingEcho()
+            // Cancel any in-flight TTS — the user shouldn't hear a half
+            // sentence after the failure banner appears.
+            voiceController?.stop()
             val errMsg = payload["error"] as? String ?: "Agent run failed"
             error.value = errMsg
             messages.add(Message(
@@ -908,6 +999,14 @@ class ChatViewModel(
             // visible leap. The timer self-cancels when the buffer empties.
             streamingDone = true
             clearPendingEcho()
+            if (type == "run.cancelled" || type == "run.timed_out") {
+                voiceController?.stop()
+            } else {
+                // Success: flush any trailing text the chunker still
+                // holds so the final fragment gets spoken. No-op when
+                // assistant.message already flushed.
+                voiceController?.finishTurn()
+            }
         }
 
         isLoading.value = false
