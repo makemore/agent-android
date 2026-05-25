@@ -18,14 +18,30 @@ data class ChatWidgetConfig(
     val title: String = "Chat Assistant",
     /** Widget subtitle */
     val subtitle: String = "How can we help you today?",
-    /** Primary theme color */
-    val primaryColor: Color = Color(0xFF0066CC),
+    /** Primary theme color. Default matches the warm-dark coral
+     *  accent so the send button blends with `appearance.accent`. */
+    val primaryColor: Color = Color(0xFFD97757),
     /** Input placeholder text */
-    val placeholder: String = "Type your message...",
+    val placeholder: String = "How can I help you today?",
     /** Empty state heading */
     val emptyStateTitle: String = "Start a Conversation",
     /** Empty state description */
     val emptyStateMessage: String = "Send a message to get started.",
+
+    // -- Appearance / Branding --
+    /** Visual tokens (palette, typography, composer style, brand
+     *  mark). Defaults to the warm-dark `anthropic` look so the
+     *  bundled widget renders the high-end baseline out of the box.
+     *  Set to [ChatAppearance.classic] to restore the pre-redesign
+     *  look. */
+    val appearance: ChatAppearance = ChatAppearance.anthropic(),
+    /** Empty-state greeting (e.g. "Good afternoon, Chris"). Opt-in
+     *  on the data type so direct consumers of `MessageListView`
+     *  see no change; the bundled `ChatWidgetView` enables it. */
+    val greeting: ChatGreetingConfig = ChatGreetingConfig(enabled = true),
+    /** Slide-in conversation sidebar. Same opt-in pattern as
+     *  [greeting]. */
+    val sidebar: ChatSidebarConfig = ChatSidebarConfig(enabled = true),
 
     // -- Feature Flags --
     /** Show debug mode toggle */

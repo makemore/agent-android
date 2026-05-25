@@ -51,10 +51,14 @@ fun ScenarioLauncherScreen(
             backendUrl = stubUrl,
             agentKey = "test-agent",
             testFixture = fixture,
-            autoSendOnLaunch = true,
+            autoSendOnLaunch = !scenario.manual,
             autoSendPrompt = scenario.prompt,
             autoSendFollowUps = scenario.followUps,
-            authToken = null
+            authToken = null,
+            enableTTS = scenario.enableTTS,
+            enableVoice = scenario.enableVoice,
+            anthropicShell = scenario.anthropicShell,
+            userName = scenario.userName,
         )
     }
 
@@ -64,10 +68,14 @@ fun ScenarioLauncherScreen(
             backendUrl = backendUrl,
             agentKey = scenario.agentKeyOverride ?: agentKey,
             testFixture = "",
-            autoSendOnLaunch = true,
+            autoSendOnLaunch = !scenario.manual,
             autoSendPrompt = scenario.prompt,
             autoSendFollowUps = scenario.followUps,
-            authToken = authToken.ifBlank { null }
+            authToken = authToken.ifBlank { null },
+            enableTTS = scenario.enableTTS,
+            enableVoice = scenario.enableVoice,
+            anthropicShell = scenario.anthropicShell,
+            userName = scenario.userName,
         )
     }
 
@@ -91,6 +99,22 @@ fun ScenarioLauncherScreen(
                     authToken = authToken, onAuthToken = { authToken = it },
                     agentKey = agentKey, onAgentKey = { agentKey = it }
                 )
+            }
+
+            item { SectionHeader("S'Ai shell (warm-dark baseline)") }
+            item {
+                Text(
+                    "Greeting, rounded composer card, slide-in sidebar on a warm-dark background.",
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            items(Scenarios.anthropicShell, key = { it.id }) { scenario ->
+                ScenarioRow(scenario) {
+                    val fixture = (scenario.kind as Scenario.Kind.Stub).fixture
+                    onScenarioPicked(stubHost(scenario, fixture))
+                }
             }
 
             item { SectionHeader("Stub fixtures (start clients/test-stub-server)") }

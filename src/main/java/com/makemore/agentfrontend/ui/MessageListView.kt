@@ -112,9 +112,16 @@ fun MessageListView(
     }
 
     if (displayMessages.isEmpty() && !isLoading) {
-        // Empty state
+        // Empty state — when the host opts in via `greeting.enabled`
+        // we render the warm-dark serif greeting; otherwise we fall
+        // back to the legacy speech-bubble placeholder so existing
+        // consumers see no change.
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            EmptyStateView(config)
+            if (config.greeting.enabled) {
+                GreetingView(config = config)
+            } else {
+                EmptyStateView(config)
+            }
         }
     } else {
         LazyColumn(

@@ -200,3 +200,17 @@ example/                          # Sample host app — open in Android Studio
 ## Sample App
 
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
+
+## Changelog
+
+### 0.7.0
+
+**Warm-dark "S'Ai" shell** (parity with `agent-ios` 0.8.0)
+
+- **New configuration types** — `ChatAppearance` (palette, typography, composer style, brand-mark style), `ChatGreetingConfig` (time-of-day greeting + optional user name), and `ChatSidebarConfig` (slide-in drawer items, wordmark, footer). `ChatWidgetConfig` now exposes `appearance`, `greeting`, and `sidebar` properties; defaults flipped to the warm-dark baseline (`#0E0E0E` background, `#D97757` coral accent, `composerStyle = ANTHROPIC`, greeting + sidebar enabled). Set `ChatAppearance.classic()` and `greeting.copy(enabled = false)` / `sidebar.copy(enabled = false)` to restore the pre-redesign look.
+- **`GreetingView`** — new centered empty-state composable: brand starburst + system-serif `"Good {morning|afternoon|evening}, {name}"`. `MessageListView` swaps to it when `config.greeting.enabled`.
+- **`ChatSidebarView`** — slide-in conversation drawer (~80% of screen width, floored at 280 dp). Header wordmark, nav rows, Recents loaded via the existing `APIClient.loadConversations`, footer avatar + "New chat" pill wired to `ChatViewModel.clearMessages()` / `loadConversation(id)`. Dim backdrop, tap-outside to dismiss.
+- **`AnthropicTopBar` + sidebar overlay in `ChatWidgetView`** — bundled widget now mounts a top bar with a circular hamburger button (opens the sidebar) and a "+" new-chat button. When `sidebar.enabled = false` the widget renders exactly as before.
+- **`InputView` composer styles** — `ComposerStyle.ANTHROPIC` renders a two-row rounded card (text row + action row with `+` attach, model pill, mic, send circle); `ComposerStyle.CLASSIC` keeps the legacy single-row layout. Voice/STT logic is unchanged and shared between both styles via extracted `MicButton`, `RightActionButton`, and `ModelPill` composables.
+- **`AddToChatSheet`** — `ModalBottomSheet` presented by the composer `+` button. Camera + Recents preview tiles, action rows (Add files, Add to project, Choose style…), tool toggles, and connectors list. Re-skins automatically for hosts using `.classic`.
+- **Example app** — `HostConfiguration` gains `anthropicShell`, `userName`, `enableTTS`, `enableVoice`. `ScenarioLauncherScreen` adds a "S'Ai shell (warm-dark baseline)" section with `S'Ai home (empty chat)` and `S'Ai home (streaming demo)` scenarios. Legacy scenarios explicitly opt out so they keep the classic look for A/B comparison.

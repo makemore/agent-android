@@ -17,7 +17,23 @@ data class Scenario(
      *  reading the launcher's "Agent key" field. Used by Resilient
      *  scenarios to pin `sai-triage` so the user doesn't have to retype
      *  it after switching backends. */
-    val agentKeyOverride: String? = null
+    val agentKeyOverride: String? = null,
+    /** When `true`, opens the chat without firing `autoSendPrompt` so
+     *  the developer can drive the turn manually (e.g. via the mic
+     *  button). Mirrors the iOS `Scenario.manual` flag. */
+    val manual: Boolean = false,
+    /** Turn TTS playback on for this scenario. */
+    val enableTTS: Boolean = false,
+    /** Show the mic button so speech results land in the input field. */
+    val enableVoice: Boolean = false,
+    /** Render the warm-dark shell (rounded composer card, greeting
+     *  empty state, slide-in sidebar). Defaults to `false` so the
+     *  existing scenarios keep their original look; the "S'Ai home"
+     *  scenarios flip this on. */
+    val anthropicShell: Boolean = false,
+    /** Optional first name for the greeting. The launcher uses this
+     *  to personalise the greeting in warm-dark scenarios. */
+    val userName: String? = null,
 ) {
     sealed class Kind {
         /** Replays the named JSON fixture via the local Python stub server. */
@@ -33,6 +49,39 @@ data class Scenario(
 }
 
 object Scenarios {
+    /** Warm-dark baseline scenarios. Both flip `anthropicShell` on so
+     *  the host opts into the full new look (warm-dark background,
+     *  rounded composer, greeting, sidebar). The empty-chat entry
+     *  shows the idle home state. Mirrors `ScenarioLauncherView.anthropicShellScenarios`. */
+    val anthropicShell: List<Scenario> = listOf(
+        Scenario(
+            id = "sai_home_empty",
+            title = "S'Ai home (empty chat)",
+            subtitle = "Greeting + rounded composer + sidebar, idle empty state",
+            kind = Scenario.Kind.Stub("simple_streaming"),
+            prompt = "",
+            followUps = emptyList(),
+            manual = true,
+            enableTTS = false,
+            enableVoice = true,
+            anthropicShell = true,
+        ),
+        Scenario(
+            id = "sai_home_streaming",
+            title = "S'Ai home (streaming demo)",
+            subtitle = "Same shell, auto-sends a prompt so you can see the chat layout",
+            kind = Scenario.Kind.Stub("demo_big_conversation"),
+            prompt = "Plan me a 3-day trip to Tokyo",
+            followUps = listOf(
+                HostConfiguration.FollowUp("Yes, please book it.", delayMs = 1500),
+            ),
+            manual = false,
+            enableTTS = false,
+            enableVoice = true,
+            anthropicShell = true,
+        ),
+    )
+
     /** Stub-server scenarios. Mirrors `ScenarioLauncherView.stubScenarios`. */
     val stub: List<Scenario> = listOf(
         Scenario(

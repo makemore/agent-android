@@ -5,11 +5,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -21,8 +24,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import android.Manifest
 import android.content.Intent
 import android.os.Bundle
@@ -86,6 +92,10 @@ fun InputView(
     var lastSendWasMic by remember { mutableStateOf(false) }
     val countdownState = remember { mutableFloatStateOf(0f) }
     val countdownProgress = countdownState.floatValue
+    // Drives the AddToChatSheet presentation. Tapping `+` (anthropic)
+    // or the paperclip (classic) flips this on; the sheet itself
+    // dismisses by clearing the flag.
+    var showAddToChat by remember { mutableStateOf(false) }
 
     // Refs the listener captures (snapshots state for the recognizer
     // callback thread without forcing recomposition).
@@ -263,6 +273,125 @@ fun InputView(
         }
     }
 
+    // Right-action button is shared across both composer styles. Three
+    // states: cancel (run in flight), stop (TTS playing), send.
+    val rightActionButton: @Composable () -> Unit = {
+        RightActionButton(
+            isLoading = isLoading,
+            isAgentSpeaking = isAgentSpeaking,
+            canSend = canSend,
+            accent = config.appearance.accent,
+            textOnAccent = config.appearance.textOnAccent,
+            onCancel = onCancel,
+            onStopAgent = { userStopAgent() },
+            onSend = { doSend() },
+        )
+    }
+
+    when (config.appearance.composerStyle) {
+        ChatAppearance.ComposerStyle.ANTHROPIC -> {
+            AnthropicComposer(
+                config = config,
+                inputText = inputText,
+                onInputChange = { inputTextState.value = it },
+                onAddToChat = { showAddToChat = true },
+                onSend = { doSend() },
+                voiceEnabled = config.enableVoice,
+                isRecording = isRecording,
+                autoSendEnabled = autoSendEnabled,
+                countdownProgress = countdownProgress,
+                onToggleAutoSend = {
+                    val next = !autoSendState.value
+                    autoSendState.value = next
+                    storage.set("autoSend", if (next) "true" else "false")
+                    if (!next) {
+                        cancelSilenceTimer()
+                        lastSendWasMic = false
+                    }
+                },
+                onToggleRecording = {
+                    if (isRecording) {
+                        stopRecordingFully()
+                    } else {
+                        if (!hasAudioPermission) {
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            isRecordingState.value = true
+                            bargeInFiredRef[0] = false
+                            monitorModeRef[0] = isAgentSpeaking
+                            startListeningInternal()
+                        }
+                    }
+                },
+                rightActionButton = rightActionButton,
+            )
+        }
+        ChatAppearance.ComposerStyle.CLASSIC -> {
+            ClassicComposer(
+                config = config,
+                inputText = inputText,
+                onInputChange = { inputTextState.value = it },
+                onSend = { doSend() },
+                onAddToChat = { showAddToChat = true },
+                voiceEnabled = config.enableVoice,
+                isRecording = isRecording,
+                autoSendEnabled = autoSendEnabled,
+                countdownProgress = countdownProgress,
+                onToggleAutoSend = {
+                    val next = !autoSendState.value
+                    autoSendState.value = next
+                    storage.set("autoSend", if (next) "true" else "false")
+                    if (!next) {
+                        cancelSilenceTimer()
+                        lastSendWasMic = false
+                    }
+                },
+                onToggleRecording = {
+                    if (isRecording) {
+                        stopRecordingFully()
+                    } else {
+                        if (!hasAudioPermission) {
+                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        } else {
+                            isRecordingState.value = true
+                            bargeInFiredRef[0] = false
+                            monitorModeRef[0] = isAgentSpeaking
+                            startListeningInternal()
+                        }
+                    }
+                },
+                rightActionButton = rightActionButton,
+            )
+        }
+    }
+
+    if (showAddToChat) {
+        AddToChatSheet(
+            config = config,
+            onAddFiles = {
+                // TODO: route into the platform file picker once implemented.
+                showAddToChat = false
+            },
+            onDismiss = { showAddToChat = false },
+        )
+    }
+}
+
+@Composable
+private fun ClassicComposer(
+    config: ChatWidgetConfig,
+    inputText: String,
+    onInputChange: (String) -> Unit,
+    onSend: () -> Unit,
+    onAddToChat: () -> Unit,
+    voiceEnabled: Boolean,
+    isRecording: Boolean,
+    autoSendEnabled: Boolean,
+    countdownProgress: Float,
+    onToggleAutoSend: () -> Unit,
+    onToggleRecording: () -> Unit,
+    rightActionButton: @Composable () -> Unit,
+) {
     HorizontalDivider()
 
     Row(
@@ -273,87 +402,41 @@ fun InputView(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // File attachment button
+        // File attachment button — routes through the AddToChatSheet
+        // so classic hosts get the same attach/connectors picker as
+        // anthropic. Hosts without `enableFiles` keep the slimmer row.
         if (config.enableFiles) {
             IconButton(
-                onClick = { /* TODO: file picker */ },
+                onClick = onAddToChat,
                 modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     Icons.Default.AttachFile,
-                    contentDescription = "Attach file",
+                    contentDescription = "Add to chat",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
 
         // Voice input button (with countdown ring when auto-send armed).
-        if (config.enableVoice) {
-            Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                if (autoSendEnabled && isRecording && countdownProgress > 0f) {
-                    Canvas(modifier = Modifier.size(28.dp)) {
-                        drawArc(
-                            color = Color.Red,
-                            startAngle = -90f,
-                            sweepAngle = 360f * countdownProgress,
-                            useCenter = false,
-                            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
-                        )
-                    }
-                }
-                IconButton(
-                    onClick = {
-                        if (isRecording) {
-                            stopRecordingFully()
-                        } else {
-                            if (!hasAudioPermission) {
-                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                return@IconButton
-                            }
-                            isRecordingState.value = true
-                            bargeInFiredRef[0] = false
-                            monitorModeRef[0] = isAgentSpeaking
-                            startListeningInternal()
-                        }
-                    },
-                    modifier = Modifier.size(40.dp)
-                ) {
-                    Icon(
-                        if (isRecording) Icons.Default.Mic else Icons.Default.MicNone,
-                        contentDescription = if (isRecording) "Stop recording" else "Voice input",
-                        tint = if (isRecording) Color.Red else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // Auto-send (hands-free) toggle.
-            IconButton(
-                onClick = {
-                    val next = !autoSendState.value
-                    autoSendState.value = next
-                    storage.set("autoSend", if (next) "true" else "false")
-                    if (!next) {
-                        cancelSilenceTimer()
-                        lastSendWasMic = false
-                    }
-                },
-                modifier = Modifier.size(40.dp)
-            ) {
-                Icon(
-                    Icons.Default.Autorenew,
-                    contentDescription = if (autoSendEnabled)
-                        "Disable hands-free auto-send"
-                    else "Enable hands-free auto-send",
-                    tint = if (autoSendEnabled) config.primaryColor
-                           else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+        if (voiceEnabled) {
+            MicButton(
+                isRecording = isRecording,
+                autoSendEnabled = autoSendEnabled,
+                countdownProgress = countdownProgress,
+                onClick = onToggleRecording,
+            )
+            AutoSendToggle(
+                autoSendEnabled = autoSendEnabled,
+                accent = config.primaryColor,
+                onClick = onToggleAutoSend,
+            )
         }
 
         // Text input
         OutlinedTextField(
             value = inputText,
-            onValueChange = { inputTextState.value = it },
+            onValueChange = onInputChange,
             placeholder = {
                 Text(
                     config.placeholder,
@@ -372,67 +455,255 @@ fun InputView(
                 focusedContainerColor = AgentColors.systemGray6,
             ),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { doSend() }),
+            keyboardActions = KeyboardActions(onSend = { onSend() }),
         )
 
-        // Send / Cancel-run / Stop-agent button. Three states:
-        //  • run in flight (isLoading)        → cancel the run
-        //  • agent is speaking (TTS playback) → stop the agent (user
-        //                                       barge-in)
-        //  • otherwise                        → send the message
-        when {
-            isLoading -> {
-                IconButton(
-                    onClick = onCancel,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFA85D5D))
-                ) {
-                    Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Cancel run",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+        rightActionButton()
+    }
+}
+
+/**
+ * Warm-dark composer: a rounded card containing the text field on top
+ * and a horizontal control row underneath. Mirrors the iOS
+ * `anthropicComposer` layout: `+` attach button, optional model pill,
+ * voice controls aligned right, and the shared right-action button.
+ */
+@Composable
+private fun AnthropicComposer(
+    config: ChatWidgetConfig,
+    inputText: String,
+    onInputChange: (String) -> Unit,
+    onAddToChat: () -> Unit,
+    onSend: () -> Unit,
+    voiceEnabled: Boolean,
+    isRecording: Boolean,
+    autoSendEnabled: Boolean,
+    countdownProgress: Float,
+    onToggleAutoSend: () -> Unit,
+    onToggleRecording: () -> Unit,
+    rightActionButton: @Composable () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(config.appearance.background)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(config.appearance.composerCornerRadius))
+                .background(config.appearance.surface),
+        ) {
+            BasicTextField(
+                value = inputText,
+                onValueChange = onInputChange,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 14.dp),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                    color = config.appearance.textPrimary,
+                ),
+                cursorBrush = SolidColor(config.appearance.accent),
+                maxLines = 6,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = { onSend() }),
+                decorationBox = { inner ->
+                    if (inputText.isEmpty()) {
+                        Text(
+                            config.placeholder,
+                            color = config.appearance.textSecondary,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+                    inner()
+                },
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (config.enableFiles) {
+                    CircularIconButton(
+                        icon = Icons.Outlined.Add,
+                        contentDescription = "Add to chat",
+                        tint = config.appearance.textSecondary,
+                        onClick = onAddToChat,
                     )
                 }
-            }
-            isAgentSpeaking -> {
-                IconButton(
-                    onClick = { userStopAgent() },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFFA85D5D))
-                ) {
-                    Icon(
-                        Icons.Default.Stop,
-                        contentDescription = "Stop speaking",
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+                config.appearance.modelPillLabel?.takeIf { it.isNotEmpty() }?.let { label ->
+                    ModelPill(
+                        label = label,
+                        appearance = config.appearance,
                     )
                 }
-            }
-            else -> {
-                IconButton(
-                    onClick = { doSend() },
-                    enabled = canSend,
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(if (canSend) config.primaryColor else Color.Gray)
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send",
-                        tint = config.primaryColor.contrastingTextColor,
-                        modifier = Modifier.size(20.dp)
+                Spacer(modifier = Modifier.weight(1f))
+                if (voiceEnabled) {
+                    AutoSendToggle(
+                        autoSendEnabled = autoSendEnabled,
+                        accent = config.appearance.accent,
+                        onClick = onToggleAutoSend,
+                    )
+                    MicButton(
+                        isRecording = isRecording,
+                        autoSendEnabled = autoSendEnabled,
+                        countdownProgress = countdownProgress,
+                        onClick = onToggleRecording,
                     )
                 }
+                rightActionButton()
             }
         }
     }
 }
+
+/** Send / Cancel-run / Stop-agent button shared by both composer
+ *  styles. Sizing and corner radius are constant across styles so the
+ *  muscle memory of "tap bottom-right" is preserved. */
+@Composable
+private fun RightActionButton(
+    isLoading: Boolean,
+    isAgentSpeaking: Boolean,
+    canSend: Boolean,
+    accent: Color,
+    textOnAccent: Color,
+    onCancel: () -> Unit,
+    onStopAgent: () -> Unit,
+    onSend: () -> Unit,
+) {
+    when {
+        isLoading -> StopButton(label = "Cancel run", onClick = onCancel)
+        isAgentSpeaking -> StopButton(label = "Stop speaking", onClick = onStopAgent)
+        else -> {
+            IconButton(
+                onClick = onSend,
+                enabled = canSend,
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .background(if (canSend) accent else Color.Gray),
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Filled.Send,
+                    contentDescription = "Send",
+                    tint = if (canSend) textOnAccent else Color.White,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StopButton(label: String, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(Color(0xFFA85D5D)),
+    ) {
+        Icon(
+            Icons.Default.Stop,
+            contentDescription = label,
+            tint = Color.White,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/** Mic button with an optional countdown ring drawn around it when
+ *  the hands-free silence timer is armed. */
+@Composable
+private fun MicButton(
+    isRecording: Boolean,
+    autoSendEnabled: Boolean,
+    countdownProgress: Float,
+    onClick: () -> Unit,
+) {
+    Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        if (autoSendEnabled && isRecording && countdownProgress > 0f) {
+            Canvas(modifier = Modifier.size(28.dp)) {
+                drawArc(
+                    color = Color.Red,
+                    startAngle = -90f,
+                    sweepAngle = 360f * countdownProgress,
+                    useCenter = false,
+                    style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round),
+                )
+            }
+        }
+        IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+            Icon(
+                if (isRecording) Icons.Default.Mic else Icons.Default.MicNone,
+                contentDescription = if (isRecording) "Stop recording" else "Voice input",
+                tint = if (isRecording) Color.Red else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AutoSendToggle(
+    autoSendEnabled: Boolean,
+    accent: Color,
+    onClick: () -> Unit,
+) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(
+            Icons.Default.Autorenew,
+            contentDescription = if (autoSendEnabled)
+                "Disable hands-free auto-send"
+            else "Enable hands-free auto-send",
+            tint = if (autoSendEnabled) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** Compact circular icon button used for the `+` (attach) affordance
+ *  on the Anthropic composer's bottom row. */
+@Composable
+private fun CircularIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(icon, contentDescription = contentDescription, tint = tint)
+    }
+}
+
+/** Pill button used for the model name. Visual only — the action is a
+ *  no-op until a host wires it to a model picker. Capsule with text
+ *  and a downward chevron. */
+@Composable
+private fun ModelPill(label: String, appearance: ChatAppearance) {
+    Row(
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(appearance.surfaceElevated)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            text = label,
+            color = appearance.textPrimary,
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+        )
+        Icon(
+            Icons.Outlined.KeyboardArrowDown,
+            contentDescription = null,
+            tint = appearance.textPrimary,
+            modifier = Modifier.size(14.dp),
+        )
+    }
+}
+
 
 private const val silenceTimeoutSeconds: Double = 3.0
 

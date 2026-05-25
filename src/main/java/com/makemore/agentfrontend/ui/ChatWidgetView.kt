@@ -1,5 +1,8 @@
 package com.makemore.agentfrontend.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -8,6 +11,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,7 +23,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.unit.dp
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
+import com.makemore.agentfrontend.networking.APIClient
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
 import com.makemore.agentfrontend.voice.VoiceController
 import com.makemore.agentfrontend.voice.VoiceFactory
@@ -34,9 +41,16 @@ fun ChatWidgetView(
     config: ChatWidgetConfig,
     modifier: Modifier = Modifier,
     voiceController: VoiceController? = null,
+    /** Used by the slide-in sidebar to populate "Recents". Defaults
+     *  to the viewModel's own client so direct callers don't have
+     *  to pass a second copy; hosts that build their own client can
+     *  inject it explicitly. */
+    apiClient: APIClient? = null,
 ) {
     var showSystemPicker by remember { mutableStateOf(false) }
+    var showSidebar by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val resolvedApiClient = apiClient ?: viewModel.apiClient
 
     // Build the controller lazily on first composition. Host apps that
     // need a custom provider pass one in via [voiceController]. The
@@ -73,54 +87,96 @@ fun ChatWidgetView(
     // host Activity uses edge-to-edge (in which case `adjustResize` no
     // longer auto-shrinks the layout and the IME inset must be consumed
     // by Compose).
-    Column(modifier = modifier
-        .fillMaxSize()
-        .imePadding()
-        .pointerInput(Unit) { detectTapGestures(onTap = { focusManager.clearFocus() }) }
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(config.appearance.background)
+            .imePadding()
+            .pointerInput(Unit) { detectTapGestures(onTap = { focusManager.clearFocus() }) }
     ) {
-        // Messages list
-        Box(modifier = Modifier.weight(1f)) {
-            MessageListView(
-                messages = viewModel.messages,
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Top bar with sidebar toggle + brand affordance — only when
+            // the sidebar is enabled. Hosts that don't want the bar can
+            // set `config.sidebar.enabled = false` and supply their own
+            // navigation chrome.
+            if (config.sidebar.enabled) {
+                AnthropicTopBar(
+                    appearance = config.appearance,
+                    onOpenSidebar = { showSidebar = true },
+                    onNewChat = { viewModel.clearMessages() },
+                )
+            }
+
+            // Messages list
+            Box(modifier = Modifier.weight(1f)) {
+                MessageListView(
+                    messages = viewModel.messages,
+                    isLoading = viewModel.isLoading.value,
+                    hasMoreMessages = viewModel.hasMoreMessages.value,
+                    loadingMoreMessages = viewModel.loadingMoreMessages.value,
+                    config = config,
+                    onLoadMore = { viewModel.loadMoreMessages() },
+                    onRetry = { index -> viewModel.retryMessage(index) },
+                    onEdit = { index, content -> viewModel.editMessage(index, content) }
+                )
+            }
+
+            // Error display
+            viewModel.error.value?.let { errorMessage ->
+                ErrorBanner(
+                    message = errorMessage,
+                    onDismiss = { viewModel.error.value = null }
+                )
+            }
+
+            // System picker / TTS toggle row — bottom-right, above input.
+            if (config.showSystemPicker || config.showTTSButton) {
+                SystemAndVoiceRow(
+                    viewModel = viewModel,
+                    config = config,
+                    voiceController = controller,
+                    onShowPicker = { showSystemPicker = true },
+                )
+            }
+
+            // Input form
+            InputView(
+                config = config,
                 isLoading = viewModel.isLoading.value,
-                hasMoreMessages = viewModel.hasMoreMessages.value,
-                loadingMoreMessages = viewModel.loadingMoreMessages.value,
-                config = config,
-                onLoadMore = { viewModel.loadMoreMessages() },
-                onRetry = { index -> viewModel.retryMessage(index) },
-                onEdit = { index, content -> viewModel.editMessage(index, content) }
-            )
-        }
-
-        // Error display
-        viewModel.error.value?.let { errorMessage ->
-            ErrorBanner(
-                message = errorMessage,
-                onDismiss = { viewModel.error.value = null }
-            )
-        }
-
-        // System picker / TTS toggle row — bottom-right, above input.
-        if (config.showSystemPicker || config.showTTSButton) {
-            SystemAndVoiceRow(
-                viewModel = viewModel,
-                config = config,
+                isAgentSpeaking = controller.isSpeaking.value,
                 voiceController = controller,
-                onShowPicker = { showSystemPicker = true },
+                onSend = { content, files ->
+                    viewModel.sendMessage(content, files)
+                },
+                onCancel = { viewModel.cancelRun() }
             )
         }
 
-        // Input form
-        InputView(
-            config = config,
-            isLoading = viewModel.isLoading.value,
-            isAgentSpeaking = controller.isSpeaking.value,
-            voiceController = controller,
-            onSend = { content, files ->
-                viewModel.sendMessage(content, files)
-            },
-            onCancel = { viewModel.cancelRun() }
-        )
+        // Slide-in sidebar overlay. Matches the iOS implementation: the
+        // panel covers ~80% of the screen width, animates in from the
+        // left, and is dismissed by tapping the scrim, picking a
+        // conversation, or starting a new chat.
+        if (config.sidebar.enabled) {
+            AnimatedVisibility(
+                visible = showSidebar,
+                enter = slideInHorizontally(initialOffsetX = { -it }),
+                exit = slideOutHorizontally(targetOffsetX = { -it }),
+            ) {
+                ChatSidebarView(
+                    config = config,
+                    apiClient = resolvedApiClient,
+                    onDismiss = { showSidebar = false },
+                    onNewChat = {
+                        viewModel.clearMessages()
+                        showSidebar = false
+                    },
+                    onSelectConversation = { conv ->
+                        viewModel.loadConversation(conv.id)
+                        showSidebar = false
+                    },
+                )
+            }
+        }
     }
 
     // System picker bottom sheet
@@ -205,6 +261,54 @@ private fun SystemAndVoiceRow(
             IconButton(onClick = onShowPicker, modifier = Modifier.size(36.dp)) {
                 Text("⚙️")
             }
+        }
+    }
+}
+
+/**
+ * Top bar shown when `config.sidebar.enabled` is `true`. Left circular
+ * button opens the sidebar; right circular button starts a fresh
+ * conversation. Both are drawn on the surface colour so they pop
+ * against the warm-dark background without an outline.
+ */
+@Composable
+private fun AnthropicTopBar(
+    appearance: ChatAppearance,
+    onOpenSidebar: () -> Unit,
+    onNewChat: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(
+            onClick = onOpenSidebar,
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(appearance.surface),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Menu,
+                contentDescription = "Open conversations",
+                tint = appearance.textPrimary,
+            )
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        IconButton(
+            onClick = onNewChat,
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(appearance.surface),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Edit,
+                contentDescription = "New conversation",
+                tint = appearance.textPrimary,
+            )
         }
     }
 }
