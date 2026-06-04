@@ -44,11 +44,27 @@ fun MessageView(
     showDebug: Boolean = false,
     onRetry: (() -> Unit)? = null,
     onEdit: (() -> Unit)? = null,
-    onBlockAction: ((com.makemore.agentfrontend.models.BlockAction) -> Unit)? = null
+    onBlockAction: ((com.makemore.agentfrontend.models.BlockAction) -> Unit)? = null,
+    // When `true` and this is an assistant text message, render the S'Ai
+    // presence orb as a small avatar at the leading edge of the row. The
+    // parent list decides per-message whether to paint an avatar
+    // (typically gated by `config.showPresenceOrb`).
+    showAgentAvatar: Boolean = false,
+    // Drives the avatar's halo glow. Only the latest assistant message
+    // should receive `true` so the scrollback doesn't bloom every row
+    // when the agent speaks.
+    agentAvatarSpeaking: Boolean = false,
 ) {
     val isUser = message.role == MessageRole.USER
     val isSystem = message.role == MessageRole.SYSTEM
     val isToolMessage = message.type == MessageType.TOOL_CALL || message.type == MessageType.TOOL_RESULT
+    // Avatar gating mirrors the bubble visibility — we only paint the
+    // orb next to an actual assistant text bubble, not next to tool /
+    // system / content-block rows (each of which has its own visual
+    // treatment that already conveys "this isn't a chat reply from
+    // the agent"). Content blocks return early above so we never
+    // reach here for them.
+    val shouldShowAvatar = showAgentAvatar && !isUser && !isSystem && !isToolMessage
 
     // Bubble-side identifier shared by both render paths so UI tests can
     // assert content (regular text, callouts, action buttons) lives inside
@@ -64,7 +80,7 @@ fun MessageView(
                 onAction = onBlockAction,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = 8.dp)
                     .semantics(mergeDescendants = false) {}
                     .testTag(bubbleTag),
                 config = config,
@@ -76,12 +92,27 @@ fun MessageView(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 2.dp)
+            .padding(horizontal = 8.dp, vertical = 2.dp)
             .semantics(mergeDescendants = false) {}
             .testTag(bubbleTag),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top
     ) {
         if (isUser) Spacer(modifier = Modifier.weight(0.2f))
+
+        if (shouldShowAvatar) {
+            // Per-message S'Ai avatar. Sits at the bubble's leading
+            // edge so the assistant identity is anchored in the
+            // scrollback. Compact mode keeps the silhouette stable;
+            // only the latest message receives `agentAvatarSpeaking`
+            // so just that one glows when audio is in flight.
+            PresenceOrbView(
+                isSpeaking = agentAvatarSpeaking,
+                baseSize = 32.dp,
+                compact = true,
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+        }
 
         Column(
             modifier = Modifier.weight(0.8f, fill = false),

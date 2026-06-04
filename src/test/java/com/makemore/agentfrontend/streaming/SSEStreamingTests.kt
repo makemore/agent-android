@@ -249,8 +249,9 @@ class SSEStreamingTests {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val loaded = !vm.isLoading.value
+            val snapshot = vm.messages.toList()
             val matched = expected?.let { exp ->
-                vm.messages.lastOrNull { it.role == MessageRole.ASSISTANT && it.type == MessageType.MESSAGE }
+                snapshot.lastOrNull { it.role == MessageRole.ASSISTANT && it.type == MessageType.MESSAGE }
                     ?.content == exp
             } ?: true
             if (loaded && matched) {
@@ -260,14 +261,22 @@ class SSEStreamingTests {
             }
             kotlinx.coroutines.delay(20)
         }
+        val snapshot = vm.messages.toList()
         fail(
             "waitForStreamSettled timed out after ${timeoutMs}ms — " +
                 "isLoading=${vm.isLoading.value}, expected=$expected, " +
-                "lastAssistant=${vm.messages.lastOrNull { it.role == MessageRole.ASSISTANT }?.content}, " +
-                "messages=${dumpMessages(vm)}"
+                "lastAssistant=${snapshot.lastOrNull { it.role == MessageRole.ASSISTANT }?.content}, " +
+                "messages=${dumpSnapshot(snapshot)}"
         )
     }
 
+    /** Snapshot [ChatViewModel.messages] before iterating: the underlying
+     *  SnapshotStateList is mutated by the streaming coroutine on the
+     *  main dispatcher, and naive iteration races with those writes,
+     *  producing flaky ConcurrentModificationException. */
     private fun dumpMessages(vm: ChatViewModel): String =
-        vm.messages.joinToString(" | ") { "${it.role}/${it.type}: ${it.content.take(40)}" }
+        dumpSnapshot(vm.messages.toList())
+
+    private fun dumpSnapshot(messages: List<Message>): String =
+        messages.joinToString(" | ") { "${it.role}/${it.type}: ${it.content.take(40)}" }
 }

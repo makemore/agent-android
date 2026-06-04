@@ -43,6 +43,39 @@ data class ChatWidgetConfig(
      *  [greeting]. */
     val sidebar: ChatSidebarConfig = ChatSidebarConfig(enabled = true),
 
+    /**
+     * Render the library's built-in top bar (hamburger + new-chat
+     * pencil) above the message list. Set to `false` when the host
+     * app provides its own navigation chrome; in that case the host
+     * is responsible for surfacing equivalents (open sidebar, start
+     * new chat) via its own UI. Default `true`.
+     *
+     * Note: when this is `false` there is no built-in affordance to
+     * open the slide-in sidebar, so hosts that hide the top bar
+     * typically also set `sidebar.enabled = false` and render their
+     * own drawer using `ChatAppearance` tokens for cohesion.
+     */
+    val showInternalTopBar: Boolean = true,
+    /**
+     * Render the pencil "new chat" button on the right of the
+     * internal top bar. Only meaningful when [showInternalTopBar]
+     * is `true`. Set to `false` so the host owns the "new chat"
+     * placement entirely — its own button should call
+     * [com.makemore.agentfrontend.viewmodels.ChatViewModel.clearMessages].
+     * Default `true`.
+     */
+    val showNewChatButton: Boolean = true,
+    /**
+     * Render the S'Ai presence orb as a small avatar at the leading
+     * edge of each assistant message. The latest assistant message
+     * glows softly while TTS playback is in flight. Set to `false`
+     * when the host wants to place the orb in its own chrome (top
+     * bar, splash, etc.) using the public `PresenceOrbView` directly,
+     * or when no agent-identity affordance is wanted in the
+     * scrollback at all. Default `true`.
+     */
+    val showPresenceOrb: Boolean = true,
+
     // -- Feature Flags --
     /** Show debug mode toggle */
     val showDebugButton: Boolean = true,
@@ -130,6 +163,13 @@ data class ChatWidgetConfig(
     val ttsProxyUrl: String? = null,
     /** ElevenLabs API key (direct mode only) */
     val elevenLabsApiKey: String? = null,
+    /** Voice identifier passed to the configured `TTSProvider`. Used by
+     *  the ElevenLabs proxy to select a specific voice (e.g. S'Ai's
+     *  branded voice). `null` falls back to the provider/proxy default. */
+    val voiceId: String? = null,
+    /** Optional ElevenLabs model override (e.g. `eleven_turbo_v2_5`).
+     *  `null` lets the provider/proxy pick. */
+    val voiceModelId: String? = null,
 
     // -- Callbacks --
     /** Event callback for SSE events */
@@ -142,7 +182,28 @@ data class ChatWidgetConfig(
      * to manage orientation locks or other chrome. Orientation handling is
      * intentionally left to the host.
      */
-    val onVideoFullScreenChange: ((Boolean) -> Unit)? = null
+    val onVideoFullScreenChange: ((Boolean) -> Unit)? = null,
+    /**
+     * Fires exactly once per conversation lifetime, the moment the runtime
+     * mints a fresh `conversationId` (i.e. the first `createRun` response
+     * carries one and `messages` was empty). Does **not** fire when an
+     * existing conversation is restored from local storage or loaded via
+     * [com.makemore.agentfrontend.viewmodels.ChatViewModel.loadConversation].
+     * Useful for analytics, first-launch coach marks, or kicking off
+     * host-side flows that should bind to a stable conversation id.
+     */
+    val onConversationStart: ((String) -> Unit)? = null,
+    /**
+     * Fires exactly once per conversation lifetime, when the first
+     * assistant message becomes visible in `messages` — whether it arrives
+     * via streaming deltas, a non-streaming `assistant.message` snap, or a
+     * host call to
+     * [com.makemore.agentfrontend.viewmodels.ChatViewModel.appendAssistantMessage].
+     * Suppressed when an existing conversation already containing assistant
+     * messages is restored. Useful for dismissing splash screens or
+     * chaining onboarding steps once S'Ai has actually spoken.
+     */
+    val onFirstAssistantMessage: ((String) -> Unit)? = null
 ) {
     companion object {
         /** Create a configuration with common settings */

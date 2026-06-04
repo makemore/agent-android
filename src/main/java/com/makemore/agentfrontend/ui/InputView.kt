@@ -8,10 +8,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -28,20 +33,28 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.makemore.agentfrontend.configuration.ChatAppearance
 import android.Manifest
+import android.content.ContentResolver
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.FileAttachment
 import com.makemore.agentfrontend.services.SharedPreferencesStorage
+import com.makemore.agentfrontend.viewmodels.ChatViewModel
 import com.makemore.agentfrontend.voice.VoiceController
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
 
 /**
  * Message input view with text field and send button.
@@ -73,6 +86,7 @@ fun InputView(
     voiceController: VoiceController? = null,
     onSend: (String, List<FileAttachment>) -> Unit,
     onCancel: () -> Unit,
+    viewModel: ChatViewModel? = null,
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -85,7 +99,10 @@ fun InputView(
     // Compose-tracked state.
     val inputTextState = remember { mutableStateOf("") }
     val inputText = inputTextState.value
-    val canSend = inputText.isNotBlank()
+    // Files staged by the user via the AddToChatSheet (camera) before
+    // hitting send. They flow through with the next turn and reset.
+    val attachedFiles = remember { mutableStateListOf<FileAttachment>() }
+    val canSend = inputText.isNotBlank() || attachedFiles.isNotEmpty()
     val isRecordingState = remember { mutableStateOf(false) }
     val isRecording = isRecordingState.value
     var hasAudioPermission by remember { mutableStateOf(false) }
@@ -109,6 +126,29 @@ fun InputView(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted -> hasAudioPermission = granted }
+
+    // Camera capture — TakePicturePreview returns a thumbnail Bitmap
+    // which we re-encode as JPEG and stage as a FileAttachment so it
+    // travels through the same upload pipeline as picker-sourced files.
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview()
+    ) { bitmap: Bitmap? ->
+        val attachment = bitmap?.let { makeAttachment(it) }
+        if (attachment != null) attachedFiles.add(attachment)
+    }
+
+    // System document picker. OpenMultipleDocuments is permission-free
+    // (the picker UI runs in a separate process and returns content://
+    // URIs the host can read). We immediately materialise each URI to
+    // bytes so the staged FileAttachment is self-contained and travels
+    // with the next createRun multipart request.
+    val documentPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        uris.forEach { uri ->
+            readDocumentAttachment(context, uri)?.let { attachedFiles.add(it) }
+        }
+    }
 
     val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
 
@@ -144,7 +184,9 @@ fun InputView(
         lastSendWasMic = isRecording
         cancelSilenceTimer()
         val textToSend = inputText
+        val filesToSend = attachedFiles.toList()
         inputTextState.value = ""
+        attachedFiles.clear()
         if (isRecording) {
             // Continuous voice mode: keep the recognizer alive, just
             // recycle so the next utterance starts fresh.
@@ -152,7 +194,7 @@ fun InputView(
             try { speechRecognizer.cancel() } catch (_: Throwable) {}
             startListeningInternal()
         }
-        onSend(textToSend, emptyList())
+        onSend(textToSend, filesToSend)
     }
 
     fun triggerBargeIn() {
@@ -288,80 +330,89 @@ fun InputView(
         )
     }
 
-    when (config.appearance.composerStyle) {
-        ChatAppearance.ComposerStyle.ANTHROPIC -> {
-            AnthropicComposer(
+    Column {
+        if (attachedFiles.isNotEmpty()) {
+            AttachedFilesRow(
                 config = config,
-                inputText = inputText,
-                onInputChange = { inputTextState.value = it },
-                onAddToChat = { showAddToChat = true },
-                onSend = { doSend() },
-                voiceEnabled = config.enableVoice,
-                isRecording = isRecording,
-                autoSendEnabled = autoSendEnabled,
-                countdownProgress = countdownProgress,
-                onToggleAutoSend = {
-                    val next = !autoSendState.value
-                    autoSendState.value = next
-                    storage.set("autoSend", if (next) "true" else "false")
-                    if (!next) {
-                        cancelSilenceTimer()
-                        lastSendWasMic = false
-                    }
-                },
-                onToggleRecording = {
-                    if (isRecording) {
-                        stopRecordingFully()
-                    } else {
-                        if (!hasAudioPermission) {
-                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else {
-                            isRecordingState.value = true
-                            bargeInFiredRef[0] = false
-                            monitorModeRef[0] = isAgentSpeaking
-                            startListeningInternal()
-                        }
-                    }
-                },
-                rightActionButton = rightActionButton,
+                files = attachedFiles,
+                onRemove = { f -> attachedFiles.removeAll { it.id == f.id } },
             )
         }
-        ChatAppearance.ComposerStyle.CLASSIC -> {
-            ClassicComposer(
-                config = config,
-                inputText = inputText,
-                onInputChange = { inputTextState.value = it },
-                onSend = { doSend() },
-                onAddToChat = { showAddToChat = true },
-                voiceEnabled = config.enableVoice,
-                isRecording = isRecording,
-                autoSendEnabled = autoSendEnabled,
-                countdownProgress = countdownProgress,
-                onToggleAutoSend = {
-                    val next = !autoSendState.value
-                    autoSendState.value = next
-                    storage.set("autoSend", if (next) "true" else "false")
-                    if (!next) {
-                        cancelSilenceTimer()
-                        lastSendWasMic = false
-                    }
-                },
-                onToggleRecording = {
-                    if (isRecording) {
-                        stopRecordingFully()
-                    } else {
-                        if (!hasAudioPermission) {
-                            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        } else {
-                            isRecordingState.value = true
-                            bargeInFiredRef[0] = false
-                            monitorModeRef[0] = isAgentSpeaking
-                            startListeningInternal()
+        when (config.appearance.composerStyle) {
+            ChatAppearance.ComposerStyle.ANTHROPIC -> {
+                AnthropicComposer(
+                    config = config,
+                    inputText = inputText,
+                    onInputChange = { inputTextState.value = it },
+                    onAddToChat = { showAddToChat = true },
+                    onSend = { doSend() },
+                    voiceEnabled = config.enableVoice,
+                    isRecording = isRecording,
+                    autoSendEnabled = autoSendEnabled,
+                    countdownProgress = countdownProgress,
+                    onToggleAutoSend = {
+                        val next = !autoSendState.value
+                        autoSendState.value = next
+                        storage.set("autoSend", if (next) "true" else "false")
+                        if (!next) {
+                            cancelSilenceTimer()
+                            lastSendWasMic = false
                         }
-                    }
-                },
-                rightActionButton = rightActionButton,
-            )
+                    },
+                    onToggleRecording = {
+                        if (isRecording) {
+                            stopRecordingFully()
+                        } else {
+                            if (!hasAudioPermission) {
+                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                isRecordingState.value = true
+                                bargeInFiredRef[0] = false
+                                monitorModeRef[0] = isAgentSpeaking
+                                startListeningInternal()
+                            }
+                        }
+                    },
+                    rightActionButton = rightActionButton,
+                )
+            }
+            ChatAppearance.ComposerStyle.CLASSIC -> {
+                ClassicComposer(
+                    config = config,
+                    inputText = inputText,
+                    onInputChange = { inputTextState.value = it },
+                    onSend = { doSend() },
+                    onAddToChat = { showAddToChat = true },
+                    voiceEnabled = config.enableVoice,
+                    isRecording = isRecording,
+                    autoSendEnabled = autoSendEnabled,
+                    countdownProgress = countdownProgress,
+                    onToggleAutoSend = {
+                        val next = !autoSendState.value
+                        autoSendState.value = next
+                        storage.set("autoSend", if (next) "true" else "false")
+                        if (!next) {
+                            cancelSilenceTimer()
+                            lastSendWasMic = false
+                        }
+                    },
+                    onToggleRecording = {
+                        if (isRecording) {
+                            stopRecordingFully()
+                        } else {
+                            if (!hasAudioPermission) {
+                                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            } else {
+                                isRecordingState.value = true
+                                bargeInFiredRef[0] = false
+                                monitorModeRef[0] = isAgentSpeaking
+                                startListeningInternal()
+                            }
+                        }
+                    },
+                    rightActionButton = rightActionButton,
+                )
+            }
         }
     }
 
@@ -369,11 +420,117 @@ fun InputView(
         AddToChatSheet(
             config = config,
             onAddFiles = {
-                // TODO: route into the platform file picker once implemented.
                 showAddToChat = false
+                // "*/*" lets any MIME through; the picker UI still
+                // honours per-app type filters callers might set later.
+                documentPickerLauncher.launch(arrayOf("*/*"))
             },
             onDismiss = { showAddToChat = false },
+            viewModel = viewModel,
+            onCaptureImage = { cameraLauncher.launch(null) },
         )
+    }
+}
+
+/** Re-encode a camera-preview [Bitmap] as JPEG @ 0.9 quality and wrap
+ *  it as a [FileAttachment] so it flows through the same upload
+ *  pipeline as files picked from the document browser. */
+private fun makeAttachment(bitmap: Bitmap): FileAttachment? {
+    val stream = ByteArrayOutputStream()
+    val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+    if (!ok) return null
+    val bytes = stream.toByteArray()
+    val name = "camera-${System.currentTimeMillis() / 1000}.jpg"
+    return FileAttachment(name = name, size = bytes.size, type = "image/jpeg", data = bytes)
+}
+
+/** Resolve a SAF [Uri] returned by the system document picker to a
+ *  self-contained [FileAttachment]. Display name + size are looked up
+ *  via [OpenableColumns]; mime type falls back to the resolver's type
+ *  when the cursor row is sparse. Bytes are read eagerly because the
+ *  Uri's read permission only lives for the activity result lifetime,
+ *  and the attachment may be deferred behind several UI ticks before
+ *  it's actually uploaded. */
+private fun readDocumentAttachment(context: Context, uri: Uri): FileAttachment? {
+    val resolver: ContentResolver = context.contentResolver
+    val mime = resolver.getType(uri) ?: "application/octet-stream"
+    var displayName: String? = null
+    var declaredSize: Int? = null
+    runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0 && !cursor.isNull(nameIdx)) displayName = cursor.getString(nameIdx)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) declaredSize = cursor.getLong(sizeIdx).toInt()
+                }
+            }
+    }
+    val bytes = runCatching {
+        resolver.openInputStream(uri)?.use { it.readBytes() }
+    }.getOrNull() ?: return null
+    val name = displayName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
+    return FileAttachment(
+        name = name,
+        size = declaredSize ?: bytes.size,
+        type = mime,
+        data = bytes,
+    )
+}
+
+/** Horizontally scrolling chip row previewing files the user has
+ *  staged for the next turn. Each chip carries a remove affordance. */
+@Composable
+private fun AttachedFilesRow(
+    config: ChatWidgetConfig,
+    files: List<FileAttachment>,
+    onRemove: (FileAttachment) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        files.forEach { file ->
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(config.appearance.surface)
+                    .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                    contentDescription = null,
+                    tint = config.appearance.textSecondary,
+                    modifier = Modifier.size(14.dp),
+                )
+                Spacer(modifier = Modifier.size(6.dp))
+                Text(
+                    text = file.name,
+                    color = config.appearance.textPrimary,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .clickable { onRemove(file) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Close,
+                        contentDescription = "Remove",
+                        tint = config.appearance.textSecondary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+            }
+        }
     }
 }
 

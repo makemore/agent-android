@@ -19,37 +19,69 @@ The library boundary is intentionally generic: `agent-client` owns agent stream 
 
 ## Installation
 
-### Local Gradle subproject (recommended for development)
+The library is published via **[JitPack](https://jitpack.io)** from the public
+`makemore/agent-android` repo — **no GitHub token or credentials required**.
+JitPack builds the repo on demand from a git tag and serves both modules
+anonymously. Two artifacts are available:
 
-In your app's `settings.gradle.kts`:
+| Coordinate | Contents |
+|------------|----------|
+| `com.github.makemore.agent-android:agent-client:<version>` | Headless core — models, networking, SSE, storage (no Compose) |
+| `com.github.makemore.agent-android:agent-frontend:<version>` | Compose chat widget + UI primitives (depends on `agent-client`) |
+
+The latest version is the most recent tag on
+[makemore/agent-android](https://github.com/makemore/agent-android/tags).
+
+### 1. Add the JitPack repository
+
+In your app's `settings.gradle.kts`, inside
+`dependencyResolutionManagement { repositories { … } }`:
+
+```kotlin
+maven { url = uri("https://jitpack.io") }
+```
+
+### 2. Add the dependency
+
+In your app module's `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("com.github.makemore.agent-android:agent-frontend:0.8.0")   // Compose UI + headless core
+    // or, headless only:
+    // implementation("com.github.makemore.agent-android:agent-client:0.8.0")
+}
+```
+
+> The `agent-frontend` artifact declares its dependency on `agent-client`
+> transitively, so you only need the one line for the full widget.
+
+<details>
+<summary><strong>Local Gradle subproject (for library development)</strong></summary>
+
+To work against the library source instead of a published artifact, in your
+app's `settings.gradle.kts`:
 
 ```kotlin
 includeBuild("/path/to/agent-android") {
     dependencySubstitution {
-        substitute(module("com.makemore:agent-client"))
+        substitute(module("com.github.makemore.agent-android:agent-client"))
             .using(project(":agent-client"))
-        substitute(module("com.makemore:agent-frontend"))
+        substitute(module("com.github.makemore.agent-android:agent-frontend"))
             .using(project(":"))
     }
 }
 ```
 
-Or copy the repo into your project and add to `settings.gradle.kts`:
+Then depend on the coordinates exactly as in step 2 — Gradle substitutes the
+local build automatically.
 
-```kotlin
-include(":agent-android", ":agent-android:agent-client")
-project(":agent-android").projectDir = file("../agent-android")
-```
+</details>
 
-In your app's `build.gradle.kts`:
+### Publishing a new release
 
-```kotlin
-dependencies {
-    implementation(project(":agent-android"))           // Compose UI + headless core
-    // or, headless only:
-    // implementation(project(":agent-android:agent-client"))
-}
-```
+See [RELEASING.md](RELEASING.md) for how to cut a version — for JitPack this is
+just pushing a semver git tag; the first consumer request triggers the build.
 
 ## Quick Start
 
@@ -202,6 +234,18 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### 0.8.0
+
+**Model picker, extended thinking & presence orb** (parity with `agent-ios` 0.9.0)
+
+- **Model picker** — `ChatViewModel` gains `availableModels` / `selectedModelId` / `selectedModel` / `selectedModelDisplayName` plus `loadModels()`, populated from `GET /api/agent-runtime/models/`. `runtimeDefaultModelId` captures `ModelsResponse.default` so the composer's model pill pre-selects the runtime's configured fallback until the user picks otherwise.
+- **Extended thinking** — per-conversation `extendedThinking` toggle forwarded to the runtime as `thinking: true` (see `agent/docs/mobile-protocol-contract.md`). Off by default; reset when the conversation is cleared.
+- **Run parameters** — `ResponseStyle` (normal/concise/…) and `ToolAccess` (auto/…) enums plus `researchEnabled` / `webSearchEnabled` flags, surfaced through `setResponseStyle` / `setToolAccess` / `setResearchEnabled` / `setWebSearchEnabled` and serialised into each turn via `runParamsSnapshot()`.
+- **`PresenceOrbView`** — new public composable: a breathing, swirling presence sphere (Compose port of the iOS `PresenceOrbView` / `agent_presence_orb.svg`). Renders as a small leading avatar in the widget when `ChatWidgetConfig.showPresenceOrb` is true, or can be embedded directly in a host top bar / splash.
+- **`AddToChatSheet` rework** — expanded attachment/configuration sheet (camera + Recents tiles, action rows, tool toggles, connectors), re-skinning automatically for `.classic` hosts.
+- **`AgentModel` capability flags** — adds `supportsTools` / `supportsVision` alongside `supportsThinking`, mapped from the runtime's snake_case keys (`supports_tools`, `supports_vision`, `supports_thinking`) via `@SerialName`.
+- **`ChatWidgetConfig` additions** — `showInternalTopBar`, `showNewChatButton`, `showPresenceOrb`, ElevenLabs `voiceId` / `voiceModelId` overrides, and `onVideoFullScreenChange` / `onConversationStart` / `onFirstAssistantMessage` host callbacks.
 
 ### 0.7.0
 

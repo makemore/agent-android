@@ -1,0 +1,15 @@
+# JitPack build configuration for makemore/agent-android.
+#
+# JitPack builds this public repo on demand when a consumer requests a tag and
+# serves the resulting AARs anonymously (no PAT needed). It injects GROUP
+# (com.github.makemore.agent-android) and VERSION (the tag) as env vars, which
+# the module build.gradle.kts files read.
+#
+# Default JitPack JDK is 8; this project needs 17 (AGP 8 / Kotlin 2.1).
+jdk:
+  - openjdk17
+
+# Publish only the two library modules to the local Maven repo (skip the
+# :example app and tests for a fast, reliable build).
+install:
+  - ./gradlew :agent-client:publishToMavenLocal :publishToMavenLocal -x test --no-daemon

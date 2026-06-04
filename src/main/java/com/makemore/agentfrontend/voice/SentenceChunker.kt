@@ -51,9 +51,14 @@ class SentenceChunker(
         }
 
         // Soft sentence boundary: only flush once we have enough chars
-        // to make a worthwhile TTS request.
+        // to make a worthwhile TTS request. The emitted *chunk* (not just
+        // the buffer) must be at least [minChars] long — otherwise a
+        // short opener like "Hello!" gets shipped as a 1-word TTS request,
+        // which ElevenLabs voices with noticeably different prosody than
+        // the same voice mid-paragraph. Skip past short sentence ends and
+        // emit at the next terminator that meets the threshold.
         while (buffer.length >= minChars) {
-            val end = sentenceEnd(buffer) ?: break
+            val end = sentenceEnd(buffer, minChunkChars = minChars) ?: break
             val head = buffer.substring(0, end).trim()
             buffer.delete(0, end)
             if (head.isNotEmpty()) emit(head)
@@ -61,16 +66,20 @@ class SentenceChunker(
     }
 
     /**
-     * Locate the index *after* the first sentence terminator that's
-     * followed by whitespace or end-of-buffer. Returns `null` when the
-     * buffer doesn't yet contain a safe break.
+     * Locate the index *after* the first sentence terminator that
+     * produces a chunk of at least [minChunkChars] characters and is
+     * followed by whitespace or end-of-buffer. Returns `null` when no
+     * such break exists yet — caller should wait for more text.
      */
-    private fun sentenceEnd(text: CharSequence): Int? {
+    private fun sentenceEnd(text: CharSequence, minChunkChars: Int = 0): Int? {
         for (i in text.indices) {
             val c = text[i]
             if (c == '.' || c == '!' || c == '?') {
                 val next = i + 1
-                if (next == text.length || text[next].isWhitespace()) {
+                val chunkLen = i + 1   // characters consumed up to and including terminator
+                if (chunkLen >= minChunkChars &&
+                    (next == text.length || text[next].isWhitespace())
+                ) {
                     return next
                 }
             }

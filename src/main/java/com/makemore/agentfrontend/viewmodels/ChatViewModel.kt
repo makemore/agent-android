@@ -60,6 +60,137 @@ class ChatViewModel(
     val selectedSystemVersionId = mutableStateOf<String?>(null)
     val isLoadingSystems = mutableStateOf(false)
 
+    // -- Model Picker State --
+    /** Models advertised by the runtime's `/api/agent-runtime/models/`
+     *  endpoint. Empty until [loadModels] succeeds. */
+    val availableModels = mutableStateListOf<AgentModel>()
+
+    /** Runtime's advertised default model id (`DEFAULT_MODEL` setting),
+     *  captured from `ModelsResponse.default`. Drives the pill label
+     *  when [selectedModelId] is null. */
+    val runtimeDefaultModelId = mutableStateOf<String?>(null)
+
+    /** True while [loadModels] is in flight. Picker UIs render a
+     *  spinner in this case but stay interactive throughout. */
+    val isLoadingModels = mutableStateOf(false)
+
+    /** Per-conversation "extended thinking" / reasoning toggle.
+     *  Forwarded to the runtime as `thinking: true`. Reset by
+     *  [clearMessages] because it is a per-conversation choice. */
+    val extendedThinking = mutableStateOf(false)
+
+    /** Identifier of the model the user has chosen for the next turn.
+     *  `null` means "let the runtime use its configured default". */
+    val selectedModelId = mutableStateOf<String?>(null)
+
+    /** Convenience: the [AgentModel] matching [selectedModelId], or
+     *  the runtime default if the user hasn't chosen explicitly. */
+    val selectedModel: AgentModel?
+        get() {
+            selectedModelId.value?.let { id ->
+                availableModels.firstOrNull { it.id == id }?.let { return it }
+            }
+            runtimeDefaultModelId.value?.let { id ->
+                availableModels.firstOrNull { it.id == id }?.let { return it }
+            }
+            return availableModels.firstOrNull()
+        }
+
+    /** Short display name for the composer's model pill. Falls back
+     *  to the host's [ChatAppearance.modelPillLabel] until the picker
+     *  has resolved a real selection. */
+    val selectedModelDisplayName: String?
+        get() = selectedModel?.name ?: config.appearance.modelPillLabel
+
+    // -- Behaviour preferences (forwarded via run `params`) --
+
+    /** Response-style preferences surfaced in the `+` sheet. Forwarded
+     *  to the backend under `params["response_style"]`; the runtime
+     *  translates the chosen tag into a system-prompt directive.
+     *  `NORMAL` means "let the agent's own prompt decide" — the default. */
+    enum class ResponseStyle(val value: String, val displayName: String) {
+        NORMAL("normal", "Normal"),
+        CONCISE("concise", "Concise"),
+        EXPLANATORY("explanatory", "Explanatory"),
+        FORMAL("formal", "Formal");
+
+        companion object {
+            fun fromValue(value: String?): ResponseStyle =
+                entries.firstOrNull { it.value == value } ?: NORMAL
+        }
+    }
+
+    /** Tool-access mode the user picked in the `+` sheet. Maps to
+     *  `params["tool_access"]`. The runtime honours this by filtering
+     *  or annotating the tool list before the agentic loop. */
+    enum class ToolAccess(val value: String, val displayName: String) {
+        AUTO("auto", "Auto"),
+        MANUAL("manual", "Manual"),
+        NONE("none", "None");
+
+        companion object {
+            fun fromValue(value: String?): ToolAccess =
+                entries.firstOrNull { it.value == value } ?: AUTO
+        }
+    }
+
+    val responseStyle = mutableStateOf(ResponseStyle.NORMAL)
+    val toolAccess = mutableStateOf(ToolAccess.AUTO)
+    val researchEnabled = mutableStateOf(false)
+    val webSearchEnabled = mutableStateOf(true)
+
+    /** Persist the current [responseStyle]. Called from the picker. */
+    fun setResponseStyle(value: ResponseStyle) {
+        if (responseStyle.value == value) return
+        responseStyle.value = value
+        storage.set(RESPONSE_STYLE_STORAGE_KEY, value.value)
+    }
+
+    /** Persist the current [toolAccess]. */
+    fun setToolAccess(value: ToolAccess) {
+        if (toolAccess.value == value) return
+        toolAccess.value = value
+        storage.set(TOOL_ACCESS_STORAGE_KEY, value.value)
+    }
+
+    fun setResearchEnabled(value: Boolean) {
+        if (researchEnabled.value == value) return
+        researchEnabled.value = value
+        storage.set(RESEARCH_STORAGE_KEY, if (value) "1" else "0")
+    }
+
+    fun setWebSearchEnabled(value: Boolean) {
+        if (webSearchEnabled.value == value) return
+        webSearchEnabled.value = value
+        storage.set(WEB_SEARCH_STORAGE_KEY, if (value) "1" else "0")
+    }
+
+    /**
+     * Snapshot of the user's current behaviour preferences as a map
+     * suitable for [APIClient.createRun]'s `params:`. Only keys whose
+     * value differs from the implicit server default are included so
+     * the runtime stays backwards-compatible with older clients that
+     * don't send these flags.
+     */
+    fun runParamsSnapshot(): Map<String, Any> {
+        val p = mutableMapOf<String, Any>()
+        if (responseStyle.value != ResponseStyle.NORMAL) {
+            p["response_style"] = responseStyle.value.value
+        }
+        if (toolAccess.value != ToolAccess.AUTO) {
+            p["tool_access"] = toolAccess.value.value
+        }
+        if (researchEnabled.value) {
+            p["research"] = true
+        }
+        // Only forward web_search when the user explicitly turned it off
+        // — keeps the payload small for the common default-on case.
+        if (!webSearchEnabled.value) {
+            p["web_search"] = false
+        }
+        return p
+    }
+
     // -- Private State --
     private var messagesOffset: Int = 0
     private var currentRunId: String? = null
@@ -83,6 +214,14 @@ class ChatViewModel(
      *  further `assistant.delta` events are dropped so they don't spawn a
      *  duplicate typewriter bubble. Reset on any non-streaming event. */
     private var turnFinalized: Boolean = false
+
+    /** Latches on the first assistant message we surface for the current
+     *  conversation lifetime so `config.onFirstAssistantMessage` only fires
+     *  once. Reset by [clearMessages] (new conversation). Set to `true` by
+     *  [loadConversation] / [loadLocalConversation] when the restored
+     *  history already contains an assistant message, so the callback
+     *  doesn't fire for replayed history. */
+    private var firstAssistantMessageFired: Boolean = false
 
     // -- Sub-agent echo suppression --
     /** Snapshot of the sub-agent's last streamed answer, captured at
@@ -129,6 +268,11 @@ class ChatViewModel(
 
     companion object {
         private const val MEMORIES_STORAGE_KEY = "chat_widget_memories"
+        private const val SELECTED_MODEL_STORAGE_KEY = "chat_widget_selected_model"
+        private const val RESPONSE_STYLE_STORAGE_KEY = "chat_widget_response_style"
+        private const val TOOL_ACCESS_STORAGE_KEY = "chat_widget_tool_access"
+        private const val RESEARCH_STORAGE_KEY = "chat_widget_research_enabled"
+        private const val WEB_SEARCH_STORAGE_KEY = "chat_widget_web_search_enabled"
     }
 
     init {
@@ -163,6 +307,26 @@ class ChatViewModel(
             val store = LocalHistoryStore(context.applicationContext, config.agentKey)
             localHistoryStore = store
             localConversations.addAll(store.loadIndex())
+        }
+
+        // Load persisted behaviour preferences. The matching `AgentModel`
+        // for `selectedModelId` is resolved lazily once `loadModels()`
+        // returns — until then `selectedModel` falls back to the runtime
+        // default.
+        storage.get(SELECTED_MODEL_STORAGE_KEY)?.takeIf { it.isNotEmpty() }?.let {
+            selectedModelId.value = it
+        }
+        storage.get(RESPONSE_STYLE_STORAGE_KEY)?.let {
+            responseStyle.value = ResponseStyle.fromValue(it)
+        }
+        storage.get(TOOL_ACCESS_STORAGE_KEY)?.let {
+            toolAccess.value = ToolAccess.fromValue(it)
+        }
+        storage.get(RESEARCH_STORAGE_KEY)?.let {
+            researchEnabled.value = it == "1"
+        }
+        storage.get(WEB_SEARCH_STORAGE_KEY)?.let {
+            webSearchEnabled.value = it == "1"
         }
     }
 
@@ -202,7 +366,7 @@ class ChatViewModel(
         content: String,
         files: List<FileAttachment> = emptyList(),
         model: String? = null,
-        thinking: Boolean = false,
+        thinking: Boolean? = null,
         supersedeFromMessageIndex: Int? = null
     ) {
         viewModelScope.launch {
@@ -221,7 +385,7 @@ class ChatViewModel(
         content: String,
         files: List<FileAttachment> = emptyList(),
         model: String? = null,
-        thinking: Boolean = false,
+        thinking: Boolean? = null,
         supersedeFromMessageIndex: Int? = null
     ) {
         val trimmed = content.trim()
@@ -254,26 +418,42 @@ class ChatViewModel(
                 listOf(mapOf("role" to "user", "content" to trimmed))
             }
 
+            // Resolve the per-turn model + thinking flag against the
+            // user's persisted picker selection if the caller didn't
+            // pass anything explicit. The behaviour-knob snapshot is
+            // forwarded unconditionally (the helper returns an empty
+            // map when everything is at defaults).
+            val resolvedModel = model ?: selectedModelId.value
+            val resolvedThinking = thinking ?: extendedThinking.value
+            val resolvedParams = runParamsSnapshot()
+
             val run = apiClient.createRun(
                 conversationId = conversationId.value,
                 messages = apiMessages,
-                model = model,
-                thinking = thinking,
+                model = resolvedModel,
+                thinking = resolvedThinking,
                 supersedeFromMessageIndex = supersedeFromMessageIndex,
                 agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
                 systemVersionId = selectedSystemVersionId.value,
                 ephemeral = config.ephemeral,
-                memories = if (config.ephemeral) clientMemories else null
+                memories = if (config.ephemeral) clientMemories else null,
+                params = resolvedParams.ifEmpty { null }
             )
 
             currentRunId = run.id
             runState.value = RunState.STREAMING
 
             // Update conversation ID if new
-            if (conversationId.value == null && run.conversationId != null) {
-                conversationId.value = run.conversationId
-                storage.set(config.conversationIdKey, run.conversationId)
+            val newConvId = run.conversationId
+            if (conversationId.value == null && newConvId != null) {
+                conversationId.value = newConvId
+                storage.set(config.conversationIdKey, newConvId)
                 if (config.ephemeral) localConversationCreatedAt = System.currentTimeMillis()
+                // Lifecycle hook: a fresh conversation has just been
+                // minted by the runtime. Fires exactly once per
+                // conversation; restoring an existing one via
+                // [loadConversation] does not trigger this.
+                config.onConversationStart?.invoke(newConvId)
             }
 
             // Subscribe to SSE events and suspend until the stream
@@ -338,7 +518,66 @@ class ChatViewModel(
         hasMoreMessages.value = false
         messagesOffset = 0
         runState.value = RunState.IDLE
+        // Reset per-conversation reasoning toggle so a new chat starts
+        // with thinking off — matches the iOS behaviour.
+        extendedThinking.value = false
+        firstAssistantMessageFired = false
         storage.set(config.conversationIdKey, null)
+    }
+
+    /**
+     * Append an assistant message to the conversation without a backend
+     * round-trip. Useful for host-scripted intros, onboarding turns, or
+     * replaying canned responses in a guided flow.
+     *
+     * The message is inserted as a fully-formed bubble (not a streaming
+     * one) and fires [ChatWidgetConfig.onFirstAssistantMessage] the first
+     * time it lands in a conversation. When [speak] is `true` and a
+     * [voiceController] is attached, the text is pushed through the
+     * chunker + finished so the TTS pipeline plays it with the same
+     * prosody settings used for real model replies.
+     *
+     * Refuses to insert while an SSE stream is in flight ([runState] ==
+     * [RunState.STREAMING] or there's a live streaming bubble) so a
+     * scripted turn can never split a real one in two. Returns the
+     * resulting [Message], or `null` if the insertion was skipped.
+     */
+    fun appendAssistantMessage(
+        text: String,
+        speak: Boolean = false,
+        blocks: List<ContentBlock>? = null,
+        emotion: Emotion? = null,
+    ): Message? {
+        if (text.isEmpty()) return null
+        if (runState.value == RunState.STREAMING || currentStreamingMessageId != null) {
+            return null
+        }
+
+        val id = "assistant-injected-${System.nanoTime()}"
+        val metadata = if (!blocks.isNullOrEmpty()) MessageMetadata(contentBlocks = blocks) else null
+        val msg = Message(
+            id = id,
+            role = MessageRole.ASSISTANT,
+            content = text,
+            type = MessageType.MESSAGE,
+            metadata = metadata,
+        )
+        messages.add(msg)
+
+        if (!firstAssistantMessageFired) {
+            firstAssistantMessageFired = true
+            config.onFirstAssistantMessage?.invoke(id)
+        }
+
+        if (speak) {
+            voiceController?.let { vc ->
+                vc.reset()
+                vc.pushDelta(text, emotion)
+                vc.finishTurn(finalText = null, emotion = emotion)
+            }
+        }
+
+        return msg
     }
 
     // -- Local History (ephemeral mode) --
@@ -365,6 +604,10 @@ class ChatViewModel(
         hasMoreMessages.value = false
         messagesOffset = 0
         error.value = null
+        // Restored history already contains earlier assistant turns —
+        // the first-assistant lifecycle hook fires only for *new*
+        // messages, not for replayed ones.
+        firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
         return true
     }
 
@@ -439,6 +682,71 @@ class ChatViewModel(
         storage.set(config.systemVersionIdKey, null)
     }
 
+    // -- Model Picker --
+
+    /**
+     * Fetch the runtime's available models and capture its advertised
+     * default. Idempotent: callers can invoke this on every appearance
+     * of the picker without worrying about cancellation, the existing
+     * list stays visible while the refresh is in flight. Any persisted
+     * [selectedModelId] that no longer exists on the runtime is cleared
+     * so the UI falls back to the default rather than displaying a
+     * stale label that won't route.
+     */
+    fun loadModels() {
+        if (isLoadingModels.value) return
+        isLoadingModels.value = true
+        viewModelScope.launch {
+            try {
+                val response = apiClient.loadModels()
+                availableModels.clear()
+                availableModels.addAll(response.models)
+                runtimeDefaultModelId.value = response.default
+
+                val chosen = selectedModelId.value
+                if (chosen != null && availableModels.none { it.id == chosen }) {
+                    selectedModelId.value = null
+                    storage.set(SELECTED_MODEL_STORAGE_KEY, null)
+                }
+            } catch (_: Exception) {
+                // Silently fail — picker UIs will keep showing whatever
+                // they already had and the next createRun will route via
+                // the server's default model.
+            }
+            isLoadingModels.value = false
+        }
+    }
+
+    /**
+     * Persist the user's model choice. Passing `null` reverts to the
+     * runtime's advertised default. Disables [extendedThinking] if the
+     * newly-chosen model doesn't support reasoning — the picker UI on
+     * iOS does the same to avoid sending a flag the backend will ignore.
+     */
+    fun selectModel(modelId: String?) {
+        if (selectedModelId.value == modelId) return
+        selectedModelId.value = modelId
+        storage.set(SELECTED_MODEL_STORAGE_KEY, modelId)
+
+        if (extendedThinking.value) {
+            val model = selectedModel
+            if (model != null && !model.supportsThinking) {
+                extendedThinking.value = false
+            }
+        }
+    }
+
+    /** Toggle reasoning for the next turn. No-op if the active model
+     *  doesn't advertise `supports_thinking`. */
+    fun setExtendedThinking(enabled: Boolean) {
+        if (extendedThinking.value == enabled) return
+        if (enabled) {
+            val model = selectedModel
+            if (model != null && !model.supportsThinking) return
+        }
+        extendedThinking.value = enabled
+    }
+
     // -- Conversation Loading --
 
     /** Load a specific conversation */
@@ -462,6 +770,9 @@ class ChatViewModel(
                 }
                 hasMoreMessages.value = conversation.hasMore ?: false
                 messagesOffset = conversation.messages?.size ?: 0
+                // Suppress the first-assistant lifecycle hook for restored
+                // conversations that already contain an assistant turn.
+                firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
             } catch (e: NotFound) {
                 conversationId.value = null
                 storage.set(config.conversationIdKey, null)
@@ -751,6 +1062,12 @@ class ChatViewModel(
                 type = MessageType.MESSAGE,
                 isStreaming = true,
             ))
+            // Lifecycle hook: first assistant bubble in this
+            // conversation. Latch so it only fires once per conv.
+            if (!firstAssistantMessageFired) {
+                firstAssistantMessageFired = true
+                config.onFirstAssistantMessage?.invoke(newId)
+            }
         }
     }
 

@@ -3,7 +3,16 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("maven-publish")
 }
+
+// JitPack injects GROUP (com.github.makemore.agent-android) and VERSION (the
+// git tag) as env vars; deriving from them keeps the published POMs — and the
+// agent-frontend → agent-client inter-module dependency — resolvable from
+// JitPack. Locally we fall back to the canonical group / agentVersion property.
+group = System.getenv("GROUP") ?: "com.makemore"
+version = System.getenv("VERSION")
+    ?: providers.gradleProperty("agentVersion").getOrElse("0.0.0-SNAPSHOT")
 
 android {
     namespace = "com.makemore.agentfrontend"
@@ -44,6 +53,34 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // Publish only the `release` variant as a Maven artifact, with sources.
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+                artifactId = "agent-frontend"
+                pom {
+                    name.set("agent-frontend")
+                    description.set(
+                        "Jetpack Compose chat widget and reusable UI primitives for " +
+                            "AI agent frontends (Android). Depends on agent-client."
+                    )
+                    url.set("https://github.com/makemore/agent-android")
+                }
+            }
+        }
+        // No remote `repositories` block: distribution is via JitPack, which
+        // builds the public repo on a tag and runs `publishToMavenLocal`.
     }
 }
 

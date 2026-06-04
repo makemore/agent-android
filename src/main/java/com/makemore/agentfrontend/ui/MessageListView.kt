@@ -30,7 +30,11 @@ fun MessageListView(
     config: ChatWidgetConfig,
     onLoadMore: () -> Unit,
     onRetry: (Int) -> Unit,
-    onEdit: (Int, String) -> Unit
+    onEdit: (Int, String) -> Unit,
+    // `true` when the agent's TTS playback is in flight. Propagated
+    // down to the latest assistant `MessageView` so its avatar can
+    // glow without recomputing per-row.
+    agentIsSpeaking: Boolean = false,
 ) {
     val listState = rememberLazyListState()
     var editingIndex by remember { mutableStateOf<Int?>(null) }
@@ -46,6 +50,22 @@ fun MessageListView(
                 !isToolMsg && !isSystemMsg
             } else true
         }
+    }
+
+    // Resolve once per render: the id of the most recent assistant
+    // text message so only its avatar gets the speaking-halo
+    // treatment. Skips tool / sub-agent / context / content-block
+    // rows so the glow always lands on a real reply.
+    val latestAssistantId: String? = remember(messages.size, messages.lastOrNull()?.id) {
+        messages.lastOrNull { msg ->
+            msg.role == MessageRole.ASSISTANT &&
+                msg.type != MessageType.TOOL_CALL &&
+                msg.type != MessageType.TOOL_RESULT &&
+                msg.type != MessageType.SUB_AGENT_START &&
+                msg.type != MessageType.SUB_AGENT_END &&
+                msg.type != MessageType.AGENT_CONTEXT &&
+                msg.type != MessageType.CONTENT_BLOCKS
+        }?.id
     }
 
     // Auto-scroll behaviour:
@@ -172,7 +192,9 @@ fun MessageListView(
                                 editText = message.content
                                 editingIndex = originalIndex
                             }
-                        } else null
+                        } else null,
+                        showAgentAvatar = config.showPresenceOrb,
+                        agentAvatarSpeaking = agentIsSpeaking && message.id == latestAssistantId,
                     )
                 }
             }

@@ -1,10 +1,13 @@
 package com.makemore.agentfrontend.models
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /**
- * Available LLM model.
- * Mirrors the iOS AgentModel struct.
+ * Available LLM model, as advertised by `GET /api/agent-runtime/models/`.
+ * Mirrors the iOS `AgentModel` struct: the runtime emits snake_case keys
+ * (`supports_thinking`, `supports_tools`, `supports_vision`) so the
+ * mapping is spelt out explicitly via `@SerialName`.
  */
 @Serializable
 data class AgentModel(
@@ -12,14 +15,21 @@ data class AgentModel(
     val name: String,
     val provider: String,
     val description: String? = null,
-    val supportsThinking: Boolean = false
+    @SerialName("supports_thinking") val supportsThinking: Boolean = false,
+    @SerialName("supports_tools") val supportsTools: Boolean = true,
+    @SerialName("supports_vision") val supportsVision: Boolean = false,
 )
 
-/** Models list response */
+/**
+ * Models list response from `/api/agent-runtime/models/`. `default` is
+ * the runtime's configured fallback (`DEFAULT_MODEL`) — used by the
+ * picker to pre-select something sensible when the user hasn't chosen
+ * yet.
+ */
 @Serializable
 data class ModelsResponse(
     val models: List<AgentModel>,
-    val default: String? = null
+    val default: String? = null,
 )
 
 /** Task item */

@@ -16,17 +16,19 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.CameraAlt
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Language
-import androidx.compose.material.icons.outlined.NoteAdd
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Style
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.UnfoldMore
 import androidx.compose.material.icons.outlined.UploadFile
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,14 +51,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
+import com.makemore.agentfrontend.viewmodels.ChatViewModel
 
 /**
  * Bottom sheet presented by the composer's `+` button. Mirrors the
  * iOS `AddToChatSheet`: camera / recents tiles at the top, a list
  * of attachment + configuration rows, two feature toggles, and a
- * connectors row. Everything except "Add files" is a stub today \u2014
- * state stays local so host apps get a usable preview without any
- * wiring.
+ * connectors row.
+ *
+ * When a [ChatViewModel] is provided, the behaviour rows (Style,
+ * Tool access, Research, Web search) bind directly to its persisted
+ * preferences and the recents tile lists local conversation history.
+ * When `null` (preview / headless usage) the sheet falls back to
+ * local stub state so it still renders standalone.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,6 +71,8 @@ fun AddToChatSheet(
     config: ChatWidgetConfig,
     onAddFiles: () -> Unit,
     onDismiss: () -> Unit,
+    viewModel: ChatViewModel? = null,
+    onCaptureImage: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -83,9 +92,14 @@ fun AddToChatSheet(
                 modifier = Modifier.padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                TopTiles(config)
-                RowsCard(config, onAddFiles = onAddFiles)
-                TogglesCard(config)
+                TopTiles(
+                    config = config,
+                    viewModel = viewModel,
+                    onCaptureImage = onCaptureImage,
+                    onDismiss = onDismiss,
+                )
+                RowsCard(config = config, viewModel = viewModel, onAddFiles = onAddFiles)
+                TogglesCard(config = config, viewModel = viewModel)
                 ConnectorsCard(config)
             }
         }
@@ -123,18 +137,19 @@ private fun AddToChatHeader(config: ChatWidgetConfig, onDismiss: () -> Unit) {
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.weight(1f))
-        Text(
-            text = "All photos",
-            color = config.appearance.textPrimary,
-            fontSize = 14.sp,
-            modifier = Modifier.clickable { /* stub */ },
-        )
+        // Spacer mirror so the title stays centred under the close pill.
+        Spacer(modifier = Modifier.size(32.dp))
     }
 }
 
 
 @Composable
-private fun TopTiles(config: ChatWidgetConfig) {
+private fun TopTiles(
+    config: ChatWidgetConfig,
+    viewModel: ChatViewModel?,
+    onCaptureImage: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -145,10 +160,25 @@ private fun TopTiles(config: ChatWidgetConfig) {
             config = config,
             icon = Icons.Outlined.CameraAlt,
             label = "Camera",
-            onClick = { /* stub */ },
+            // Dismiss first so the system camera intent doesn't have to
+            // fight with the modal sheet for focus — matches the iOS
+            // behaviour where the picker is presented after the sheet
+            // closes.
+            onClick = {
+                onCaptureImage?.invoke()
+                onDismiss()
+            },
             modifier = Modifier.weight(1f),
         )
-        RecentsTile(config, modifier = Modifier.weight(1f))
+        RecentsTile(
+            config = config,
+            viewModel = viewModel,
+            onSelect = { id ->
+                onDismiss()
+                viewModel?.loadLocalConversation(id)
+            },
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -184,16 +214,18 @@ private fun TileButton(
     }
 }
 
-/** Decorative preview of the user's recent items \u2014 visual stub so
- *  the tile looks populated. Matches the iOS reference layout. */
+/** Preview of the user's three most-recent local conversations.
+ *  Falls back to placeholder copy when nothing is recorded yet so the
+ *  tile keeps its visual weight. Tapping a row hands the id off to
+ *  [onSelect] (the parent restores it via [ChatViewModel.loadLocalConversation]). */
 @Composable
-private fun RecentsTile(config: ChatWidgetConfig, modifier: Modifier = Modifier) {
-    val lines = listOf(
-        "Artifacts", "Code", "Dispatch", "Recents",
-        "Building a sports car on a bu\u2026",
-        "Data lakes vs databases exp\u2026",
-        "Mervin the Paranoid Androi\u2026",
-    )
+private fun RecentsTile(
+    config: ChatWidgetConfig,
+    viewModel: ChatViewModel?,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val recents = viewModel?.localConversations?.take(3) ?: emptyList()
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
@@ -201,23 +233,44 @@ private fun RecentsTile(config: ChatWidgetConfig, modifier: Modifier = Modifier)
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        lines.forEach { line ->
-            Text(
-                text = line,
-                color = config.appearance.textSecondary,
-                fontSize = 9.sp,
-                maxLines = 1,
-            )
+        Text(
+            text = "Recents",
+            color = config.appearance.textPrimary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+        if (recents.isEmpty()) {
+            listOf("No history yet", "Start chatting to", "see recent items").forEach { line ->
+                Text(
+                    text = line,
+                    color = config.appearance.textSecondary,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                )
+            }
+        } else {
+            recents.forEach { item ->
+                Text(
+                    text = item.title.ifEmpty { "Untitled" },
+                    color = config.appearance.textSecondary,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(item.id) },
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun RowsCard(config: ChatWidgetConfig, onAddFiles: () -> Unit) {
-    var addToProject by remember { mutableStateOf("None") }
-    var chosenStyle by remember { mutableStateOf("Normal") }
-    var toolAccess by remember { mutableStateOf("Auto") }
-
+private fun RowsCard(
+    config: ChatWidgetConfig,
+    viewModel: ChatViewModel?,
+    onAddFiles: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -226,48 +279,55 @@ private fun RowsCard(config: ChatWidgetConfig, onAddFiles: () -> Unit) {
     ) {
         ActionRow(config, icon = Icons.Outlined.UploadFile, label = "Add files", onClick = onAddFiles)
         RowDivider(config)
-        ValueRow(config, icon = Icons.Outlined.Inbox, label = "Add to project", value = addToProject) {
-            addToProject = if (addToProject == "None") "Personal" else "None"
-        }
+        // Project linking isn't wired to the runtime yet — render the
+        // row so the layout matches the iOS reference, but tag it as
+        // Soon to set expectations.
+        SoonRow(config, icon = Icons.Outlined.Inbox, label = "Add to project")
         RowDivider(config)
-        ValueRow(config, icon = Icons.Outlined.Style, label = "Choose style", value = chosenStyle) {
-            chosenStyle = if (chosenStyle == "Normal") "Concise" else "Normal"
-        }
+        StyleMenuRow(config, viewModel)
         RowDivider(config)
-        ValueRow(config, icon = Icons.Outlined.Tune, label = "Tool access", value = toolAccess) {
-            toolAccess = if (toolAccess == "Auto") "Manual" else "Auto"
-        }
+        ToolAccessMenuRow(config, viewModel)
     }
 }
 
 @Composable
-private fun TogglesCard(config: ChatWidgetConfig) {
-    var researchEnabled by remember { mutableStateOf(false) }
-    var webSearchEnabled by remember { mutableStateOf(true) }
+private fun TogglesCard(
+    config: ChatWidgetConfig,
+    viewModel: ChatViewModel?,
+) {
+    // Fallback state used only when no ChatViewModel is wired (e.g.
+    // previews). Mirrors the iOS sheet's behaviour.
+    var fallbackResearch by remember { mutableStateOf(false) }
+    var fallbackWebSearch by remember { mutableStateOf(true) }
+
+    val research = viewModel?.researchEnabled?.value ?: fallbackResearch
+    val webSearch = viewModel?.webSearchEnabled?.value ?: fallbackWebSearch
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(config.appearance.surface),
     ) {
-        ToggleRow(config, icon = Icons.Outlined.Search, label = "Research", checked = researchEnabled) {
-            researchEnabled = it
+        ToggleRow(config, icon = Icons.Outlined.Search, label = "Research", checked = research) {
+            if (viewModel != null) viewModel.setResearchEnabled(it) else fallbackResearch = it
         }
         RowDivider(config)
-        ToggleRow(config, icon = Icons.Outlined.Language, label = "Web search", checked = webSearchEnabled) {
-            webSearchEnabled = it
+        ToggleRow(config, icon = Icons.Outlined.Language, label = "Web search", checked = webSearch) {
+            if (viewModel != null) viewModel.setWebSearchEnabled(it) else fallbackWebSearch = it
         }
     }
 }
 
 @Composable
 private fun ConnectorsCard(config: ChatWidgetConfig) {
+    // Disabled-looking row with a Soon badge — connectors aren't wired
+    // to the runtime yet. Matches the iOS reference layout.
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(config.appearance.surface)
-            .clickable { /* stub */ }
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -275,16 +335,11 @@ private fun ConnectorsCard(config: ChatWidgetConfig) {
         RowIcon(config, Icons.Outlined.GridView)
         Text(
             text = "Connectors",
-            color = config.appearance.textPrimary,
+            color = config.appearance.textPrimary.copy(alpha = 0.55f),
             fontSize = 15.sp,
             modifier = Modifier.weight(1f),
         )
-        Icon(
-            imageVector = Icons.AutoMirrored.Outlined.Send,
-            contentDescription = null,
-            tint = config.appearance.textSecondary,
-            modifier = Modifier.size(14.dp),
-        )
+        SoonBadge(config)
     }
 }
 
@@ -313,18 +368,127 @@ private fun ActionRow(
     }
 }
 
+/**
+ * Tappable row that pops a [DropdownMenu] of [options] anchored at
+ * the row itself. Used by both the response-style and tool-access
+ * pickers — they only differ in label / icon / option set / current
+ * value, so the menu mechanics live here. Falls back to a noop label
+ * row when [onSelect] does nothing useful (host hasn't wired a vm).
+ */
 @Composable
-private fun ValueRow(
+private fun <T> MenuRow(
     config: ChatWidgetConfig,
     icon: ImageVector,
     label: String,
-    value: String,
-    onClick: () -> Unit,
+    options: List<T>,
+    selected: T,
+    optionLabel: (T) -> String,
+    onSelect: (T) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true }
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            RowIcon(config, icon)
+            Text(
+                text = label,
+                color = config.appearance.textPrimary,
+                fontSize = 15.sp,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = optionLabel(selected),
+                color = config.appearance.textSecondary,
+                fontSize = 14.sp,
+            )
+            Icon(
+                imageVector = Icons.Outlined.UnfoldMore,
+                contentDescription = null,
+                tint = config.appearance.textSecondary,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(config.appearance.surfaceElevated),
+        ) {
+            options.forEach { opt ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = optionLabel(opt),
+                            color = config.appearance.textPrimary,
+                        )
+                    },
+                    leadingIcon = if (opt == selected) {
+                        {
+                            Icon(
+                                imageVector = Icons.Outlined.Check,
+                                contentDescription = null,
+                                tint = config.appearance.textPrimary,
+                            )
+                        }
+                    } else null,
+                    onClick = {
+                        onSelect(opt)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun StyleMenuRow(config: ChatWidgetConfig, viewModel: ChatViewModel?) {
+    var fallback by remember { mutableStateOf(ChatViewModel.ResponseStyle.NORMAL) }
+    val selected = viewModel?.responseStyle?.value ?: fallback
+    MenuRow(
+        config = config,
+        icon = Icons.Outlined.Style,
+        label = "Choose style",
+        options = ChatViewModel.ResponseStyle.entries,
+        selected = selected,
+        optionLabel = { it.displayName },
+        onSelect = { if (viewModel != null) viewModel.setResponseStyle(it) else fallback = it },
+    )
+}
+
+@Composable
+private fun ToolAccessMenuRow(config: ChatWidgetConfig, viewModel: ChatViewModel?) {
+    var fallback by remember { mutableStateOf(ChatViewModel.ToolAccess.AUTO) }
+    val selected = viewModel?.toolAccess?.value ?: fallback
+    MenuRow(
+        config = config,
+        icon = Icons.Outlined.Tune,
+        label = "Tool access",
+        options = ChatViewModel.ToolAccess.entries,
+        selected = selected,
+        optionLabel = { it.displayName },
+        onSelect = { if (viewModel != null) viewModel.setToolAccess(it) else fallback = it },
+    )
+}
+
+/** Disabled-looking row with a small "Soon" badge. Used for features
+ *  that aren't wired to the runtime yet so the layout matches the
+ *  reference design without misleading users into thinking the row
+ *  does something. */
+@Composable
+private fun SoonRow(
+    config: ChatWidgetConfig,
+    icon: ImageVector,
+    label: String,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -332,16 +496,26 @@ private fun ValueRow(
         RowIcon(config, icon)
         Text(
             text = label,
-            color = config.appearance.textPrimary,
+            color = config.appearance.textPrimary.copy(alpha = 0.55f),
             fontSize = 15.sp,
             modifier = Modifier.weight(1f),
         )
-        Text(
-            text = value,
-            color = config.appearance.textSecondary,
-            fontSize = 14.sp,
-        )
+        SoonBadge(config)
     }
+}
+
+@Composable
+private fun SoonBadge(config: ChatWidgetConfig) {
+    Text(
+        text = "Soon",
+        color = config.appearance.textSecondary,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(config.appearance.background.copy(alpha = 0.6f))
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    )
 }
 
 @Composable

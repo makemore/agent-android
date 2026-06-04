@@ -55,7 +55,17 @@ suspend fun APIClient.loadConversation(id: String, limit: Int = 10, offset: Int 
 
 // -- Runs --
 
-/** Create a new agent run */
+/**
+ * Create a new agent run.
+ *
+ * `params` is forwarded verbatim under the request body's `params` key.
+ * The backend's `AgentRunCreateSerializer` accepts an arbitrary dict
+ * here and folds `model` / `thinking` into it on arrival — this is how
+ * the chat widget ships behaviour knobs (response_style, tool_access,
+ * research, web_search) without breaking the wire format every time a
+ * new toggle is added. Only `String`, `Boolean`, `Int`, `Long`, and
+ * `Double` values are supported (matches `JSONObject.put`).
+ */
 suspend fun APIClient.createRun(
     conversationId: String?,
     messages: List<Map<String, Any>>,
@@ -65,7 +75,8 @@ suspend fun APIClient.createRun(
     agentKeyOverride: String? = null,
     systemVersionId: String? = null,
     ephemeral: Boolean = false,
-    memories: List<Map<String, String>>? = null
+    memories: List<Map<String, String>>? = null,
+    params: Map<String, Any>? = null
 ): AgentRun = withContext(Dispatchers.IO) {
     val token = getOrCreateSession()
 
@@ -96,6 +107,11 @@ suspend fun APIClient.createRun(
                         mem.forEach { (k, v) -> put(k, v) }
                     })
                 }
+            })
+        }
+        if (!params.isNullOrEmpty()) {
+            put("params", JSONObject().apply {
+                params.forEach { (k, v) -> put(k, v) }
             })
         }
     }
@@ -158,5 +174,25 @@ suspend fun APIClient.loadSystems(): List<AgentSystem> = withContext(Dispatchers
     } catch (_: Exception) {
         return@withContext json.decodeFromString<List<AgentSystem>>(body)
     }
+}
+
+// -- Models --
+
+/**
+ * Fetch the list of LLM models the runtime is willing to route to.
+ * Hits `GET /api/agent-runtime/models/` (configurable via
+ * `APIPaths.models`) — the same endpoint the web client and iOS app
+ * use to populate the model picker.
+ */
+suspend fun APIClient.loadModels(): ModelsResponse = withContext(Dispatchers.IO) {
+    val token = getOrCreateSession()
+    val request = buildRequest(config.apiPaths.models, "GET", token = token)
+
+    val response = httpClient.newCall(request).await()
+    if (response.code == 401) throw Unauthorized
+    if (response.code !in 200..299) throw HttpError(response.code)
+
+    val body = response.body?.string() ?: throw InvalidResponse
+    json.decodeFromString<ModelsResponse>(body)
 }
 

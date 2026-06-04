@@ -60,6 +60,8 @@ fun ChatWidgetView(
             context = context,
             config = config,
             apiClient = viewModel.apiClient,
+            voiceId = config.voiceId,
+            modelId = config.voiceModelId,
         )
     }
 
@@ -95,19 +97,28 @@ fun ChatWidgetView(
             .pointerInput(Unit) { detectTapGestures(onTap = { focusManager.clearFocus() }) }
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Top bar with sidebar toggle + brand affordance — only when
-            // the sidebar is enabled. Hosts that don't want the bar can
-            // set `config.sidebar.enabled = false` and supply their own
-            // navigation chrome.
-            if (config.sidebar.enabled) {
+            // Built-in top bar (hamburger + new-chat pencil). Hosts
+            // that provide their own navigation chrome set
+            // `config.showInternalTopBar = false` and surface
+            // equivalents themselves.
+            if (config.showInternalTopBar) {
                 AnthropicTopBar(
                     appearance = config.appearance,
+                    showSidebarButton = config.sidebar.enabled,
+                    showNewChatButton = config.showNewChatButton,
                     onOpenSidebar = { showSidebar = true },
                     onNewChat = { viewModel.clearMessages() },
                 )
             }
 
-            // Messages list
+            // Messages list. `agentIsSpeaking` propagates the TTS
+            // playback state to the latest assistant row so its avatar
+            // glows while audio is in flight. The S'Ai orb is rendered
+            // as a per-message avatar inside `MessageView` (gated by
+            // `config.showPresenceOrb`) rather than as a fixed row
+            // above the list, so it stays anchored to the assistant's
+            // identity in the scrollback instead of floating at the
+            // top of the chrome.
             Box(modifier = Modifier.weight(1f)) {
                 MessageListView(
                     messages = viewModel.messages,
@@ -117,7 +128,8 @@ fun ChatWidgetView(
                     config = config,
                     onLoadMore = { viewModel.loadMoreMessages() },
                     onRetry = { index -> viewModel.retryMessage(index) },
-                    onEdit = { index, content -> viewModel.editMessage(index, content) }
+                    onEdit = { index, content -> viewModel.editMessage(index, content) },
+                    agentIsSpeaking = controller.isSpeaking.value,
                 )
             }
 
@@ -148,7 +160,8 @@ fun ChatWidgetView(
                 onSend = { content, files ->
                     viewModel.sendMessage(content, files)
                 },
-                onCancel = { viewModel.cancelRun() }
+                onCancel = { viewModel.cancelRun() },
+                viewModel = viewModel,
             )
         }
 
@@ -266,14 +279,18 @@ private fun SystemAndVoiceRow(
 }
 
 /**
- * Top bar shown when `config.sidebar.enabled` is `true`. Left circular
- * button opens the sidebar; right circular button starts a fresh
- * conversation. Both are drawn on the surface colour so they pop
- * against the warm-dark background without an outline.
+ * Top bar shown when `config.showInternalTopBar` is `true`. Left
+ * circular button opens the sidebar (only rendered when the sidebar
+ * overlay is enabled). Right circular button starts a fresh
+ * conversation (gated by `config.showNewChatButton`). Both are drawn
+ * on the surface colour so they pop against the warm-dark background
+ * without an outline.
  */
 @Composable
 private fun AnthropicTopBar(
     appearance: ChatAppearance,
+    showSidebarButton: Boolean,
+    showNewChatButton: Boolean,
     onOpenSidebar: () -> Unit,
     onNewChat: () -> Unit,
 ) {
@@ -283,32 +300,36 @@ private fun AnthropicTopBar(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(
-            onClick = onOpenSidebar,
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(appearance.surface),
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Menu,
-                contentDescription = "Open conversations",
-                tint = appearance.textPrimary,
-            )
+        if (showSidebarButton) {
+            IconButton(
+                onClick = onOpenSidebar,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(appearance.surface),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Menu,
+                    contentDescription = "Open conversations",
+                    tint = appearance.textPrimary,
+                )
+            }
         }
         Spacer(modifier = Modifier.weight(1f))
-        IconButton(
-            onClick = onNewChat,
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(appearance.surface),
-        ) {
-            Icon(
-                imageVector = Icons.Outlined.Edit,
-                contentDescription = "New conversation",
-                tint = appearance.textPrimary,
-            )
+        if (showNewChatButton) {
+            IconButton(
+                onClick = onNewChat,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(appearance.surface),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Edit,
+                    contentDescription = "New conversation",
+                    tint = appearance.textPrimary,
+                )
+            }
         }
     }
 }

@@ -44,7 +44,7 @@ class AgentStreamStateTest {
         .fold(AgentRunReducerState()) { state, event -> state.reduce(event) }
 
     private fun fixtureEvents(name: String): List<AgentStreamEvent> {
-        val raw = JSONObject(File(locateFixturesDir(), "$name.json").readText())
+        val raw = JSONObject(locateFixture("$name.json").readText())
         val runId = raw.getString("run_id")
         val events = raw.getJSONArray("events")
         return (0 until events.length()).map { idx ->
@@ -60,16 +60,20 @@ class AgentStreamStateTest {
         }
     }
 
-    private fun locateFixturesDir(): File {
+    /** Walk up from the test working directory looking for the requested
+     *  fixture under `clients/test-fixtures/sse/` or `test-fixtures/sse/`.
+     *  Checking for the *file* (not just the directory) avoids stopping at
+     *  a partial sibling fixtures dir that only contains a subset. */
+    private fun locateFixture(fileName: String): File {
         var dir: File? = File("").absoluteFile
         repeat(10) {
             val cur = dir ?: return@repeat
-            val direct = File(cur, "clients/test-fixtures/sse")
-            if (direct.isDirectory) return direct
-            val sibling = File(cur, "test-fixtures/sse")
-            if (sibling.isDirectory) return sibling
+            val direct = File(cur, "clients/test-fixtures/sse/$fileName")
+            if (direct.isFile) return direct
+            val sibling = File(cur, "test-fixtures/sse/$fileName")
+            if (sibling.isFile) return sibling
             dir = cur.parentFile
         }
-        error("Could not locate clients/test-fixtures/sse")
+        error("Could not locate fixture: $fileName under clients/test-fixtures/sse")
     }
 }
