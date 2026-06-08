@@ -47,9 +47,9 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:0.8.0")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:0.9.0")   // Compose UI + headless core
     // or, headless only:
-    // implementation("com.github.makemore.agent-android:agent-client:0.8.0")
+    // implementation("com.github.makemore.agent-android:agent-client:0.9.0")
 }
 ```
 
@@ -234,6 +234,13 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### 0.9.0
+
+**`showModelSelector` now gates the model selector** (parity with `agent-ios` 0.10.0)
+
+- **Behaviour change** — `ChatWidgetConfig.showModelSelector` (default `false`) finally controls the composer model selector. The Anthropic composer's model pill is rendered **only** when `showModelSelector == true`. Previously the flag was unused and the pill appeared whenever a model label resolved. Hosts that relied on seeing the model selector must now set `showModelSelector = true` explicitly.
+- Model-loading in `ChatViewModel` is unchanged; this is purely a visibility gate on the composer pill.
 
 ### 0.8.0
 

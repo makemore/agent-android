@@ -85,9 +85,9 @@ In your **app module's** `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:0.8.0")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:0.9.0")   // Compose UI + headless core
     // or, headless only (no Compose):
-    // implementation("com.github.makemore.agent-android:agent-client:0.8.0")
+    // implementation("com.github.makemore.agent-android:agent-client:0.9.0")
 }
 ```
 

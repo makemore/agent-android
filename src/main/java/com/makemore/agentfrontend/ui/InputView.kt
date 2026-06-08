@@ -691,11 +691,16 @@ private fun AnthropicComposer(
                         onClick = onAddToChat,
                     )
                 }
-                config.appearance.modelPillLabel?.takeIf { it.isNotEmpty() }?.let { label ->
-                    ModelPill(
-                        label = label,
-                        appearance = config.appearance,
-                    )
+                // Gated on `showModelSelector` (off by default) — the pill
+                // is the only entry point to the model selector, so hiding
+                // it fully suppresses the selector for hosts that don't opt in.
+                if (config.showModelSelector) {
+                    config.appearance.modelPillLabel?.takeIf { it.isNotEmpty() }?.let { label ->
+                        ModelPill(
+                            label = label,
+                            appearance = config.appearance,
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 if (voiceEnabled) {

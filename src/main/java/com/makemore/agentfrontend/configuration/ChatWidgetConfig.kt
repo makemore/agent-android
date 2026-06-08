@@ -89,7 +89,10 @@ data class ChatWidgetConfig(
     val enableVoice: Boolean = true,
     /** Enable file attachments */
     val enableFiles: Boolean = true,
-    /** Show model selector */
+    /** Gates the composer model selector. When `true` the Anthropic
+     *  composer renders the model pill — the entry point to the model
+     *  selector. When `false` (the default) the pill, and therefore the
+     *  whole model selector, is hidden; hosts that want it must opt in. */
     val showModelSelector: Boolean = false,
     /** Show tasks tab */
     val showTasksTab: Boolean = true,

@@ -70,4 +70,12 @@ class ChatViewModelTest {
             vm.conversationId.value
         )
     }
+
+    @Test
+    fun `model selector is opt-in and off by default`() {
+        // The composer model pill (the only entry point to the model
+        // selector) is gated on showModelSelector, which defaults to off.
+        assertFalse(ChatWidgetConfig().showModelSelector)
+        assertTrue(ChatWidgetConfig(showModelSelector = true).showModelSelector)
+    }
 }
