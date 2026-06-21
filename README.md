@@ -47,9 +47,9 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:0.9.0")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:3.0.0")   // Compose UI + headless core
     // or, headless only:
-    // implementation("com.github.makemore.agent-android:agent-client:0.9.0")
+    // implementation("com.github.makemore.agent-android:agent-client:3.0.0")
 }
 ```
 
@@ -234,6 +234,13 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### 3.0.0
+
+**Unified client versioning + themable transcript** (shared version line with `agent-ios` / web)
+
+- **Synchronized versioning** — iOS, Android, and web clients now share a single version line starting at `3.0.0`. This release carries the same feature set as the prior `0.9.0` tag; the major bump signals production maturity and version alignment across platforms, not a breaking API change.
+- **Message-bubble theming** — `ChatAppearance` gains `userBubble`, `assistantBubble`, `systemBubble`, and `link` tokens. `MessageView` now drives bubble background, text color, corner radius, and markdown link tint from these tokens, with fallbacks to host `primaryColor` / adaptive `AgentColors` greys, so existing integrations are unaffected.
 
 ### 0.9.0
 

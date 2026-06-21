@@ -13,6 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.takeOrElse
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -118,17 +119,27 @@ fun MessageView(
             modifier = Modifier.weight(0.8f, fill = false),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
         ) {
-            // Message bubble
+            // Message bubble. Colours, link tint, and corner radius are
+            // driven by the host's `appearance` tokens; the `?:` / takeOrElse
+            // fall-backs preserve the pre-token behaviour (primaryColor for
+            // the user bubble + links, adaptive system grey for assistant /
+            // tool bubbles) so `ChatAppearance.classic()` is unchanged.
+            val appearance = config.appearance
             val bubbleColor = when {
-                isUser -> config.primaryColor
-                isToolMessage || isSystem -> AgentColors.systemGray6
-                else -> AgentColors.systemGray5
+                isUser -> appearance.userBubble ?: config.primaryColor
+                isToolMessage || isSystem -> appearance.systemBubble ?: AgentColors.systemGray6
+                else -> appearance.assistantBubble ?: AgentColors.systemGray5
             }
-            val textColor = bubbleColor.contrastingTextColor
+            val textColor = if (isUser) {
+                appearance.textOnAccent.takeOrElse { bubbleColor.contrastingTextColor }
+            } else {
+                appearance.textPrimary.takeOrElse { bubbleColor.contrastingTextColor }
+            }
+            val linkColor = appearance.link ?: config.primaryColor
 
             Column(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
+                    .clip(RoundedCornerShape(appearance.bubbleCornerRadius))
                     .background(bubbleColor)
                     .padding(12.dp)
             ) {
@@ -160,6 +171,7 @@ fun MessageView(
                         content = message.content,
                         colors = markdownColor(
                             text = textColor,
+                            linkText = linkColor,
                             codeBackground = textColor.copy(alpha = 0.08f),
                             inlineCodeBackground = textColor.copy(alpha = 0.08f),
                             dividerColor = textColor.copy(alpha = 0.2f),
@@ -208,7 +220,7 @@ fun MessageView(
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = label,
-                            color = config.primaryColor,
+                            color = linkColor,
                             style = MaterialTheme.typography.labelLarge
                         )
                     }

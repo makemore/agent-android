@@ -1,5 +1,6 @@
 package com.makemore.agentfrontend.streaming
 
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.APIClient
@@ -121,7 +122,11 @@ class SSEStreamingTests {
         val fixture = SSEFixture.load("sai_multi_agent_handoff")
         installDispatcher(fixture)
 
-        val vm = ChatViewModel(config, apiClient, storage)
+        // BUBBLES-mode test: asserts sub-agent reply bubble + SUB_AGENT_START/END.
+        // The library default is now PILL (subAgentActivityStyle); this test pins
+        // the classic BUBBLES style it was written to validate.
+        val bubbleConfig = config.copy(appearance = ChatAppearance.classic())
+        val vm = ChatViewModel(bubbleConfig, APIClient(bubbleConfig, storage), storage)
         vm.sendMessage("I'm anxious about something")
         val therapistReply =
             "Hi, I'm here to listen. Could you tell me a little about what's on your mind?"
@@ -148,7 +153,9 @@ class SSEStreamingTests {
         val fixture = SSEFixture.load("sai_multi_agent_with_blocks")
         installDispatcher(fixture)
 
-        val vm = ChatViewModel(config, apiClient, storage)
+        // BUBBLES-mode test (see note above); pins the classic style.
+        val bubbleConfig = config.copy(appearance = ChatAppearance.classic())
+        val vm = ChatViewModel(bubbleConfig, APIClient(bubbleConfig, storage), storage)
         vm.sendMessage("Show me my account")
         waitForStreamSettled(vm)
 

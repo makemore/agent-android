@@ -84,6 +84,10 @@ data class MessageMetadata(
     val subAgentKey: String? = null,
     val agentName: String? = null,
     val invocationMode: String? = null,
+    /** Wall-clock duration of a completed sub-agent bracket, in seconds.
+     *  Set on the collapsed `SUB_AGENT_END` "Consulted X · Ns" row emitted
+     *  in pill mode. Null for bubble-mode sub-agent rows. */
+    val subAgentDurationSeconds: Double? = null,
     val contentBlocks: List<ContentBlock>? = null,
     val actionId: String? = null,
     val actionType: String? = null,

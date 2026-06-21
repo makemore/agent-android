@@ -15,4 +15,8 @@ object SessionCreationFailed : APIError("Failed to create session")
 object CancelFailed : APIError("Failed to cancel run")
 data class DecodingError(val underlying: Throwable) : APIError("Failed to decode response: ${underlying.message}", underlying)
 data class NetworkError(val underlying: Throwable) : APIError("Network error: ${underlying.message}", underlying)
+data class InsecureTransport(val host: String) : APIError(
+    "Refusing to send over an insecure (non-HTTPS) connection to $host. " +
+        "Use an https:// backend URL, or set allowInsecureHTTP for local development."
+)
 

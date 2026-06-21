@@ -98,8 +98,11 @@ data class ChatWidgetConfig(
     val showTasksTab: Boolean = true,
     /** Show system picker (settings cog) */
     val showSystemPicker: Boolean = true,
-    /** Show tool call/result messages in chat (hidden when false, like web frontend) */
-    val showToolMessages: Boolean = true,
+    /** Show tool call/result and sub-agent orchestration messages in the
+     *  chat thread. When `false` (the default, matching iOS and the web
+     *  frontend) these events are processed internally but not rendered as
+     *  visible messages; hosts that want the verbose thread opt in. */
+    val showToolMessages: Boolean = false,
     /**
      * Follow the assistant's streaming reply by auto-scrolling to the
      * bottom on every token. When `false` the list stays put while the
@@ -110,6 +113,14 @@ data class ChatWidgetConfig(
     /** Ephemeral mode: conversation history stays on the client.
      * The server only holds run data for a short pickup window. */
     val ephemeral: Boolean = false,
+    /** Private-only egress: when true, every run is flagged `private_only`
+     * so the server routes it ONLY to the configured private model endpoint
+     * (fail-closed). Set this for data-sovereignty-restricted users. */
+    val privateOnly: Boolean = false,
+    /** Allow cleartext HTTP to the backend. Default false: the client refuses
+     * to send over a non-HTTPS connection (except to local dev hosts). Only
+     * enable for local development against an http:// backend. */
+    val allowInsecureHTTP: Boolean = false,
     val followStreamingEnabled: Boolean = true,
     /**
      * How close to the bottom (in dp) the list must be before streaming

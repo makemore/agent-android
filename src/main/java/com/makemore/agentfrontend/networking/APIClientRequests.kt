@@ -75,6 +75,7 @@ suspend fun APIClient.createRun(
     agentKeyOverride: String? = null,
     systemVersionId: String? = null,
     ephemeral: Boolean = false,
+    privateOnly: Boolean = false,
     memories: List<Map<String, String>>? = null,
     params: Map<String, Any>? = null
 ): AgentRun = withContext(Dispatchers.IO) {
@@ -100,6 +101,7 @@ suspend fun APIClient.createRun(
         supersedeFromMessageIndex?.let { put("supersedeFromMessageIndex", it) }
         systemVersionId?.let { put("systemVersionId", it) }
         if (ephemeral) put("ephemeral", true)
+        if (privateOnly) put("private_only", true)
         if (!memories.isNullOrEmpty()) {
             put("memories", JSONArray().apply {
                 memories.forEach { mem ->

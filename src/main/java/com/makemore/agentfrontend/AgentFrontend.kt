@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.networking.APIClient
 import com.makemore.agentfrontend.services.InMemoryStorage
+import com.makemore.agentfrontend.services.SecureStorageService
 import com.makemore.agentfrontend.services.SharedPreferencesStorage
 import com.makemore.agentfrontend.services.StorageService
 import com.makemore.agentfrontend.ui.ChatWidgetView
@@ -51,7 +52,13 @@ object AgentFrontend {
         config: ChatWidgetConfig,
         modifier: Modifier = Modifier
     ) {
-        val storage = SharedPreferencesStorage(context, prefix = config.agentKey)
+        // Secrets (auth token, client memories) are encrypted via the Android
+        // Keystore; non-secret UI prefs stay in plain SharedPreferences.
+        val storage = SecureStorageService.makeDefault(
+            context,
+            prefix = config.agentKey,
+            secureKeys = setOf(config.anonymousTokenKey),
+        )
         val apiClient = APIClient(config, storage)
         val viewModel = ChatViewModel(config, apiClient, storage, context = context)
 
@@ -87,7 +94,13 @@ object AgentFrontend {
      * @return A ChatViewModel instance
      */
     fun createViewModel(context: Context, config: ChatWidgetConfig): ChatViewModel {
-        val storage = SharedPreferencesStorage(context, prefix = config.agentKey)
+        // Secrets (auth token, client memories) are encrypted via the Android
+        // Keystore; non-secret UI prefs stay in plain SharedPreferences.
+        val storage = SecureStorageService.makeDefault(
+            context,
+            prefix = config.agentKey,
+            secureKeys = setOf(config.anonymousTokenKey),
+        )
         val apiClient = APIClient(config, storage)
         return ChatViewModel(config, apiClient, storage, context = context)
     }

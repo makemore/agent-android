@@ -12,10 +12,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.Message
 import com.makemore.agentfrontend.models.MessageRole
 import com.makemore.agentfrontend.models.MessageType
+import com.makemore.agentfrontend.models.SubAgentActivityState
 
 /**
  * Message list view with auto-scroll behavior.
@@ -35,6 +37,10 @@ fun MessageListView(
     // down to the latest assistant `MessageView` so its avatar can
     // glow without recomputing per-row.
     agentIsSpeaking: Boolean = false,
+    // Transient sub-agent activity. In pill mode and while a bracket is
+    // open, the activity pill renders in place of the "Thinking…" spinner.
+    // Empty/inactive in bubbles mode — falls back to the spinner.
+    subAgentActivity: SubAgentActivityState = SubAgentActivityState(),
 ) {
     val listState = rememberLazyListState()
     var editingIndex by remember { mutableStateOf<Int?>(null) }
@@ -199,8 +205,21 @@ fun MessageListView(
                 }
             }
 
-            // Loading indicator
-            if (isLoading) {
+            // Activity indicator. In pill mode, an open sub-agent bracket
+            // renders the activity pill in place of the generic spinner so
+            // the user sees which specialist is running and a tail of its
+            // narration. Otherwise fall back to the "Thinking…" spinner.
+            val pillActive = subAgentActivity.isActive &&
+                config.appearance.subAgentActivityStyle == ChatAppearance.SubAgentActivityStyle.PILL
+            if (pillActive) {
+                item {
+                    SubAgentActivityPillView(
+                        activity = subAgentActivity,
+                        appearance = config.appearance,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+                    )
+                }
+            } else if (isLoading) {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),

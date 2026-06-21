@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
@@ -52,6 +53,14 @@ class ChatViewModel(
     val hasMoreMessages = mutableStateOf(false)
     val loadingMoreMessages = mutableStateOf(false)
     val runState = mutableStateOf(RunState.IDLE)
+
+    /** Transient "what the sub-agents are doing right now" state. Driven
+     *  only when [ChatAppearance.subAgentActivityStyle] is `PILL`; the UI
+     *  renders [com.makemore.agentfrontend.ui.SubAgentActivityPillView]
+     *  from it in place of the generic spinner while a bracket is open.
+     *  Stays empty in `BUBBLES` mode. Mirrors the iOS `@Published
+     *  subAgentActivity`. */
+    val subAgentActivity = mutableStateOf(SubAgentActivityState())
 
     // -- System State --
     val systems = mutableStateListOf<AgentSystem>()
@@ -436,6 +445,7 @@ class ChatViewModel(
                 agentKeyOverride = if (effectiveAgentKey != config.agentKey) effectiveAgentKey else null,
                 systemVersionId = selectedSystemVersionId.value,
                 ephemeral = config.ephemeral,
+                privateOnly = config.privateOnly,
                 memories = if (config.ephemeral) clientMemories else null,
                 params = resolvedParams.ifEmpty { null }
             )
@@ -486,6 +496,9 @@ class ChatViewModel(
                 // differs from the natural-end path (`handleTerminalEvent`) which
                 // deliberately lets the drain finish smoothly.
                 resetStreamBuffer()
+                // Clear any in-flight sub-agent activity so the pill
+                // disappears immediately on Stop.
+                subAgentActivity.value = SubAgentActivityState()
                 // Cut off any in-flight TTS playback when the user cancels.
                 voiceController?.stop()
                 isLoading.value = false
@@ -512,6 +525,7 @@ class ChatViewModel(
      *  starts a new in-memory conversation. */
     fun clearMessages() {
         messages.clear()
+        subAgentActivity.value = SubAgentActivityState()
         conversationId.value = null
         localConversationCreatedAt = null
         error.value = null
@@ -623,6 +637,22 @@ class ChatViewModel(
     fun purgeLocalHistory() {
         localHistoryStore?.purgeAll()
         localConversations.clear()
+    }
+
+    /**
+     * Wipe all on-device data for this agent — call on logout / sign-out so a
+     * later holder of the device finds nothing. Clears local conversation
+     * history, cached client memories, the in-memory transcript, and the
+     * stored auth/anonymous token (removed from the encrypted store).
+     */
+    fun clearAllLocalData() {
+        purgeLocalHistory()
+        storage.set(MEMORIES_STORAGE_KEY, null)
+        clientMemories.clear()
+        messages.clear()
+        conversationId.value = null
+        storage.set(config.conversationIdKey, null)
+        apiClient.clearSession()
     }
 
     // -- System Selection --
@@ -924,6 +954,16 @@ class ChatViewModel(
     private fun handleAssistantDelta(payload: Map<String, Any?>) {
         val delta = payload["delta"] as? String ?: return
 
+        // Pill mode: while a sub-agent bracket is active the deltas are
+        // narration from a sub-agent. Divert them into the activity ticker
+        // rather than the message list so the wall of intermediate chatter
+        // never produces a bubble. Voice intentionally stays silent — the
+        // user only hears the parent orchestrator's final synthesis.
+        if (usesPillActivity && subAgentActivity.value.isActive) {
+            subAgentActivity.value = subAgentActivity.value.appendingDelta(delta)
+            return
+        }
+
         // Drop late-arriving deltas for a turn whose authoritative
         // `assistant.message` has already been applied. A new turn is
         // signalled by any non-streaming event, which resets `turnFinalized`.
@@ -991,6 +1031,16 @@ class ChatViewModel(
      */
     private fun handleAssistantMessage(payload: Map<String, Any?>) {
         val content = payload["content"] as? String ?: return
+
+        // Pill mode: while a sub-agent bracket is active the authoritative
+        // final message belongs to the sub-agent, not to a user-visible
+        // bubble. Snap the ticker to the final text so the pill stops
+        // looking mid-stream, and return — the matching `sub_agent.end`
+        // pops the frame and emits the collapsed history row.
+        if (usesPillActivity && subAgentActivity.value.isActive) {
+            subAgentActivity.value = subAgentActivity.value.settingFinal(content)
+            return
+        }
 
         // Unconditionally mark the turn finalised — the server's "this turn
         // is done" signal. Any `assistant.delta` that arrives later must be
@@ -1096,9 +1146,19 @@ class ChatViewModel(
     }
 
     private fun handleToolCall(payload: Map<String, Any?>) {
+        val name = payload["name"] as? String ?: payload["tool_name"] as? String ?: "tool"
+
+        // Pill mode: tool calls from inside a sub-agent bracket are part of
+        // the same "thinking" activity and shouldn't show as a bubble.
+        // Surface the latest tool name on the pill instead so the user
+        // still sees what the sub-agent is reaching for.
+        if (usesPillActivity && subAgentActivity.value.isActive) {
+            subAgentActivity.value = subAgentActivity.value.notingToolCall(name)
+            return
+        }
+
         closeStreamingSession()
         clearPendingEcho()
-        val name = payload["name"] as? String ?: payload["tool_name"] as? String ?: "tool"
         messages.add(Message(
             id = "tool-call-${System.currentTimeMillis()}",
             role = MessageRole.ASSISTANT,
@@ -1114,6 +1174,14 @@ class ChatViewModel(
 
     @Suppress("UNCHECKED_CAST")
     private fun handleToolResult(payload: Map<String, Any?>) {
+        // Pill mode: silently absorb tool results that arrive inside a
+        // sub-agent bracket — the activity pill already reflects the tool
+        // call, and we don't want a "✓ Done" row in the history for work
+        // the user only saw as a ticker tail.
+        if (usesPillActivity && subAgentActivity.value.isActive) {
+            return
+        }
+
         closeStreamingSession()
         val result = payload["result"] as? Map<String, Any?>
         val isError = result?.containsKey("error") == true
@@ -1144,9 +1212,25 @@ class ChatViewModel(
 
     private fun handleSubAgentStart(payload: Map<String, Any?>) {
         closeStreamingSession()
+        // A new sub-agent invocation supersedes any pending echo reference
+        // from a previous one.
         clearPendingEcho()
         val agentName = payload["agent_name"] as? String
             ?: payload["sub_agent_key"] as? String ?: "sub-agent"
+
+        if (usesPillActivity) {
+            // Pill mode: don't emit a "🔗 Delegating…" bubble; the pill view
+            // picks up the new frame and renders the agent name next to its
+            // live ticker tail.
+            subAgentActivity.value = subAgentActivity.value.pushing(
+                SubAgentActivityState.Frame(
+                    agentName = agentName,
+                    subAgentKey = payload["sub_agent_key"] as? String,
+                )
+            )
+            return
+        }
+
         messages.add(Message(
             id = "sub-agent-start-${System.currentTimeMillis()}",
             role = MessageRole.SYSTEM,
@@ -1161,6 +1245,35 @@ class ChatViewModel(
     }
 
     private fun handleSubAgentEnd(payload: Map<String, Any?>) {
+        if (usesPillActivity) {
+            // Pop the matching frame. If it was the outermost one, drop a
+            // single quiet "Consulted <agent> · 4s" row into the history so
+            // the bracket is still represented (subject to the host's
+            // showToolMessages filter). The parent's own final reply renders
+            // below as the actual answer — no echo suppression in pill mode
+            // because the sub-agent never produced a bubble to echo.
+            val (newState, popped) = subAgentActivity.value.popping()
+            subAgentActivity.value = newState
+            val agentName = payload["agent_name"] as? String
+                ?: popped?.agentName
+                ?: "Sub-agent"
+            if (!newState.isActive && popped != null) {
+                val durationSeconds = (System.currentTimeMillis() - popped.startedAt.time) / 1000.0
+                messages.add(Message(
+                    id = "sub-agent-end-${System.currentTimeMillis()}",
+                    role = MessageRole.SYSTEM,
+                    content = "Consulted $agentName · ${formatDuration(durationSeconds)}",
+                    type = MessageType.SUB_AGENT_END,
+                    metadata = MessageMetadata(
+                        subAgentKey = payload["sub_agent_key"] as? String,
+                        agentName = agentName,
+                        subAgentDurationSeconds = durationSeconds
+                    )
+                ))
+            }
+            return
+        }
+
         closeStreamingSession()
         // Capture the sub-agent's final streamed text as the echo reference
         // so the parent's upcoming re-stream of the same answer can be
@@ -1182,6 +1295,24 @@ class ChatViewModel(
             pendingEchoBuffer = StringBuilder()
             pendingEchoDiverged = false
         }
+    }
+
+    /** `true` when the host has opted into pill-style sub-agent activity
+     *  (the warm-dark default). In this mode the reducer suppresses
+     *  per-event sub-agent bubbles and diverts the activity into
+     *  [subAgentActivity], leaving behind a single collapsed history row on
+     *  bracket close. `false` preserves the original behaviour: every
+     *  sub-agent event becomes its own bubble. */
+    private val usesPillActivity: Boolean
+        get() = config.appearance.subAgentActivityStyle == ChatAppearance.SubAgentActivityStyle.PILL
+
+    /** Format an elapsed-seconds value for the collapsed "Consulted X · Ns"
+     *  row. Sub-1s rounds to one decimal so quick handoffs don't display as
+     *  "0s"; longer durations show whole seconds. Mirrors iOS
+     *  `ChatViewModel.formatDuration`. */
+    private fun formatDuration(seconds: Double): String {
+        if (seconds < 1) return String.format("%.1fs", seconds)
+        return "${Math.round(seconds)}s"
     }
 
     @Suppress("UNCHECKED_CAST")

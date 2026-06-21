@@ -130,6 +130,7 @@ fun ChatWidgetView(
                     onRetry = { index -> viewModel.retryMessage(index) },
                     onEdit = { index, content -> viewModel.editMessage(index, content) },
                     agentIsSpeaking = controller.isSpeaking.value,
+                    subAgentActivity = viewModel.subAgentActivity.value,
                 )
             }
 

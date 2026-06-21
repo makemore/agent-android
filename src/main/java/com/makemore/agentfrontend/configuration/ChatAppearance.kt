@@ -42,6 +42,28 @@ data class ChatAppearance(
      *  customised by the host. */
     val accent: Color = Color(0xFFD97757),
 
+    // Bubbles
+    /** Background colour for the user's own message bubbles. When `null`
+     *  the transcript falls back to [ChatWidgetConfig.primaryColor],
+     *  preserving the prior (host-customisable) behaviour; set a value
+     *  to theme the user side of the transcript independently. */
+    val userBubble: Color? = null,
+    /** Background colour for assistant message bubbles. When `null` the
+     *  transcript falls back to the adaptive system grey it used before
+     *  the warm-dark redesign, so `classic()` is unchanged. The default
+     *  supplies the warm tone for the anthropic baseline. */
+    val assistantBubble: Color? = Color(0xFF3A3A37),
+    /** Background colour for tool / system message bubbles. When `null`
+     *  the transcript falls back to the adaptive system grey, keeping
+     *  `classic()` unchanged. The default supplies the warm tone for the
+     *  anthropic baseline. */
+    val systemBubble: Color? = Color(0xFF2F2F2D),
+    /** Colour for markdown links and `requiredAction` labels in the
+     *  transcript. When `null` the transcript falls back to
+     *  [ChatWidgetConfig.primaryColor], matching the prior behaviour;
+     *  set a value to re-tint links independently. */
+    val link: Color? = null,
+
     // Typography
     /** Font family used for the empty-state greeting headline.
      *  [FontFamily.Serif] gives the warm editorial look the baseline
@@ -63,11 +85,34 @@ data class ChatAppearance(
      *  When `null` the pill is hidden. Host apps drive this from their
      *  currently selected model so the composer surfaces what's active. */
     val modelPillLabel: String? = null,
+    /** How sub-agent activity surfaces in the UI. Library default is
+     *  [SubAgentActivityStyle.PILL] so multi-specialist chains stay calm;
+     *  the classic appearance opts back into [SubAgentActivityStyle.BUBBLES]
+     *  for the old per-event behaviour. */
+    val subAgentActivityStyle: SubAgentActivityStyle = SubAgentActivityStyle.PILL,
 ) {
     /** Composer layout. [ANTHROPIC] is the rounded card with a model pill
      *  and circular voice button; [CLASSIC] is the original single-row
      *  pill input. Library default is [ANTHROPIC]. */
     enum class ComposerStyle { CLASSIC, ANTHROPIC }
+
+    /** How to render a sub-agent's activity while it is streaming.
+     *
+     *  - [PILL]: hide the per-event "🔗 Delegating…" / "✓ completed" /
+     *    sub-agent streaming bubbles. Instead show a single quiet pill
+     *    below the message list with the current sub-agent's name and a
+     *    head-truncated tail of its latest output, then collapse to a
+     *    "Consulted <agent> · Xs" row in the history once the bracket
+     *    ends. The parent orchestrator's own final reply renders below it
+     *    as the actual answer. This is the warm-dark default and keeps
+     *    complex multi-specialist chains feeling calm and on-task.
+     *
+     *  - [BUBBLES]: original behaviour — every `sub_agent.start` /
+     *    `assistant.delta` / `assistant.message` / `sub_agent.end` appears
+     *    as a separate bubble or system row, and the parent's re-stream of
+     *    the sub-agent's answer is suppressed as an echo. Kept for hosts on
+     *    the classic appearance. */
+    enum class SubAgentActivityStyle { PILL, BUBBLES }
 
     /** Empty-state brand mark. [None] hides the mark and shows the
      *  greeting text alone; [SystemIcon] renders a Material icon above
@@ -95,12 +140,15 @@ data class ChatAppearance(
             textSecondary = Color.Unspecified,
             textOnAccent = Color.White,
             accent = Color(0xFF4A6B8E),
+            assistantBubble = null,
+            systemBubble = null,
             greetingFontFamily = FontFamily.Default,
             greetingFontSize = 17.sp,
             composerStyle = ComposerStyle.CLASSIC,
             brandMark = BrandMark.SystemIcon("ChatBubbleOutline"),
             composerCornerRadius = 20.dp,
             bubbleCornerRadius = 16.dp,
+            subAgentActivityStyle = SubAgentActivityStyle.BUBBLES,
         )
 
         /** Warm-dark look — the new library default. Equivalent to

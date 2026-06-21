@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import okhttp3.*
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -45,8 +46,29 @@ class APIClient(
             return AuthStrategy.NONE
         }
 
+    companion object {
+        /** Local-dev hosts that may use cleartext HTTP even when
+         * allowInsecureHTTP is off: loopback, the emulator alias, `.local`. */
+        fun isDevHost(host: String?): Boolean {
+            val h = host?.lowercase() ?: return false
+            return h == "localhost" || h == "127.0.0.1" || h == "::1" ||
+                h == "10.0.2.2" || h.endsWith(".local")
+        }
+    }
+
+    /** Fail closed on cleartext transport — called before any network egress. */
+    fun validateTransport() {
+        val url = config.backendUrl.toHttpUrlOrNull()
+            ?: throw InsecureTransport(config.backendUrl)
+        if (url.scheme == "https") return
+        if (config.allowInsecureHTTP) return
+        if (isDevHost(url.host)) return
+        throw InsecureTransport(url.host)
+    }
+
     /** Get or create a session token */
     suspend fun getOrCreateSession(forceRefresh: Boolean = false): String? = withContext(Dispatchers.IO) {
+        validateTransport()
         val strategy = authStrategy
         if (strategy != AuthStrategy.ANONYMOUS) {
             return@withContext authToken ?: config.authToken
