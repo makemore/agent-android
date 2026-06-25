@@ -4,7 +4,10 @@ import android.content.Context
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import com.makemore.agentfrontend.voice.AndroidVoiceCandidate
 import com.makemore.agentfrontend.voice.Emotion
+import com.makemore.agentfrontend.voice.LocalVoiceGenderPreference
+import com.makemore.agentfrontend.voice.LocalVoiceSelector
 import com.makemore.agentfrontend.voice.TTSProvider
 import com.makemore.agentfrontend.voice.TTSSpeakOptions
 import com.makemore.agentfrontend.voice.VoiceDescriptor
@@ -31,12 +34,22 @@ class AndroidTTSProvider(
     private val defaultVoiceId: String? = null,
     private val baseRate: Float = 1.0f,
     private val basePitch: Float = 1.0f,
+    private val localOnly: Boolean = false,
+    private val enginePackageName: String? = null,
+    private val preferredLocale: Locale = Locale.getDefault(),
+    private val genderPreference: LocalVoiceGenderPreference = LocalVoiceGenderPreference.MALE,
 ) : TTSProvider {
     override val name: String = "android-tts"
 
     private val ready = CompletableDeferred<Boolean>()
-    private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
-        ready.complete(status == TextToSpeech.SUCCESS)
+    private val tts: TextToSpeech = if (enginePackageName.isNullOrBlank()) {
+        TextToSpeech(context.applicationContext) { status ->
+            ready.complete(status == TextToSpeech.SUCCESS)
+        }
+    } else {
+        TextToSpeech(context.applicationContext, { status ->
+            ready.complete(status == TextToSpeech.SUCCESS)
+        }, enginePackageName)
     }
     private val nextId = AtomicLong(1)
 
@@ -94,13 +107,16 @@ class AndroidTTSProvider(
 
     override suspend fun listVoices(): List<VoiceDescriptor> {
         if (!ready.await()) return emptyList()
-        return tts.voices?.map { v ->
+        return tts.voices
+            ?.filter { !localOnly || !it.isNetworkConnectionRequired }
+            ?.map { v ->
             VoiceDescriptor(
                 id = v.name,
                 name = v.name,
                 labels = mapOf(
                     "lang" to v.locale.toLanguageTag(),
                     "quality" to v.quality.toString(),
+                    "networkRequired" to v.isNetworkConnectionRequired.toString(),
                 ),
             )
         } ?: emptyList()
@@ -123,6 +139,21 @@ class AndroidTTSProvider(
     }
 
     private fun applyVoice(voiceId: String?) {
+        if (localOnly) {
+            val voices = tts.voices?.map { v ->
+                AndroidVoiceCandidate(
+                    name = v.name,
+                    locale = v.locale,
+                    quality = v.quality,
+                    isNetworkConnectionRequired = v.isNetworkConnectionRequired,
+                    features = v.features.orEmpty(),
+                )
+            }.orEmpty()
+            val selected = LocalVoiceSelector.chooseLocalVoice(voices, voiceId, preferredLocale, genderPreference)
+                ?: throw NoLocalTTSVoiceException()
+            tts.voices?.firstOrNull { it.name == selected.name }?.let { tts.voice = it }
+            return
+        }
         if (voiceId == null) {
             tts.language = Locale.getDefault()
             return
@@ -131,6 +162,8 @@ class AndroidTTSProvider(
         if (match != null) tts.voice = match
         else tts.language = Locale.getDefault()
     }
+
+    class NoLocalTTSVoiceException : RuntimeException("Voice unavailable because no local voice is installed")
 
     /**
      * Coarse mapping — bigger pitch + slight rate bump for upbeat

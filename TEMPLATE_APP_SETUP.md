@@ -450,6 +450,7 @@ import com.makemore.agentfrontend.configuration.AuthStrategy
 import com.makemore.agentfrontend.configuration.ChatSidebarConfig
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
+import com.makemore.agentfrontend.voice.TTSProviderPolicy
 
 class AppViewModel(context: Context, token: String?) {
     var showSidebar by mutableStateOf(false)
@@ -464,6 +465,11 @@ class AppViewModel(context: Context, token: String?) {
         sidebar = ChatSidebarConfig(enabled = false), // host provides the sidebar
         showTasksTab = false,
         enableFiles = true,
+        // Voice output:
+        // Normal mode: enableTTS = true, ttsProviderPolicy = TTSProviderPolicy.AUTOMATIC
+        // Protected mode: privateOnly = true, enableTTS = true, ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY
+        // Local/system TTS quality depends on the OS/device and will not match ElevenLabs.
+        // Android local TTS defaults to a best-effort male voice when the engine exposes one.
         // Auth — AuthStrategy.TOKEN for DRF, AuthStrategy.JWT for Bearer.
         authStrategy = token?.let { AuthStrategy.TOKEN },
         authToken = token,

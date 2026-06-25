@@ -29,6 +29,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -41,12 +43,14 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
+import com.makemore.agentfrontend.voice.SpeechInputPolicy
 import com.makemore.agentfrontend.models.FileAttachment
 import com.makemore.agentfrontend.services.SharedPreferencesStorage
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
@@ -90,6 +94,8 @@ fun InputView(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     // Persisted user toggle (default on).
     val storage = remember { SharedPreferencesStorage(context, prefix = "voice") }
@@ -150,16 +156,34 @@ fun InputView(
         }
     }
 
-    val speechRecognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
+    val effectiveSpeechInputPolicy = config.effectiveSpeechInputPolicy
+    val speechInputAvailable = config.enableVoice && when (effectiveSpeechInputPolicy) {
+        SpeechInputPolicy.DISABLED -> false
+        SpeechInputPolicy.LOCAL_ONLY -> isLocalSpeechRecognitionAvailable(context)
+        SpeechInputPolicy.AUTOMATIC, SpeechInputPolicy.REMOTE -> SpeechRecognizer.isRecognitionAvailable(context)
+    }
+
+    val speechRecognizer = remember(effectiveSpeechInputPolicy, speechInputAvailable) {
+        if (!speechInputAvailable) null
+        else if (effectiveSpeechInputPolicy == SpeechInputPolicy.LOCAL_ONLY && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
+        } else {
+            SpeechRecognizer.createSpeechRecognizer(context)
+        }
+    }
 
     fun startListeningInternal() {
+        val recognizer = speechRecognizer ?: return
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            if (effectiveSpeechInputPolicy == SpeechInputPolicy.LOCAL_ONLY) {
+                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            }
         }
         sessionRef[0]++
         activeSessionRef[0] = sessionRef[0]
-        try { speechRecognizer.startListening(intent) } catch (_: Throwable) {}
+        try { recognizer.startListening(intent) } catch (_: Throwable) {}
     }
 
     fun cancelSilenceTimer() {
@@ -168,10 +192,24 @@ fun InputView(
         countdownState.floatValue = 0f
     }
 
+    fun dismissTextKeyboard() {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+        // Some OEM IMEs reopen if hide() races with the focused field's
+        // recomposition after send. Repeat once after the current frame so
+        // submits from the keyboard action and send button behave the same.
+        coroutineScope.launch {
+            delay(75)
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
+    }
+
     fun stopRecordingFully() {
         sessionRef[0]++
         cancelSilenceTimer()
-        try { speechRecognizer.cancel() } catch (_: Throwable) {}
+        dismissTextKeyboard()
+        try { speechRecognizer?.cancel() } catch (_: Throwable) {}
         isRecordingState.value = false
         monitorModeRef[0] = false
         bargeInFiredRef[0] = false
@@ -179,6 +217,7 @@ fun InputView(
 
     fun doSend() {
         if (!canSend) return
+        dismissTextKeyboard()
         // Latch the input source so the hands-free loop knows this turn
         // originated from the mic.
         lastSendWasMic = isRecording
@@ -191,7 +230,7 @@ fun InputView(
             // Continuous voice mode: keep the recognizer alive, just
             // recycle so the next utterance starts fresh.
             sessionRef[0]++
-            try { speechRecognizer.cancel() } catch (_: Throwable) {}
+            try { speechRecognizer?.cancel() } catch (_: Throwable) {}
             startListeningInternal()
         }
         onSend(textToSend, filesToSend)
@@ -205,6 +244,7 @@ fun InputView(
 
     fun userStopAgent() {
         bargeInFiredRef[0] = true
+        dismissTextKeyboard()
         voiceController?.stop()
     }
 
@@ -226,6 +266,7 @@ fun InputView(
     }
 
     DisposableEffect(Unit) {
+        val recognizer = speechRecognizer ?: return@DisposableEffect onDispose { cancelSilenceTimer() }
         val listener = object : RecognitionListener {
             override fun onResults(results: Bundle?) {
                 if (activeSessionRef[0] != sessionRef[0]) return
@@ -274,10 +315,10 @@ fun InputView(
             override fun onEndOfSpeech() {}
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
-        speechRecognizer.setRecognitionListener(listener)
+        recognizer.setRecognitionListener(listener)
         onDispose {
             cancelSilenceTimer()
-            try { speechRecognizer.destroy() } catch (_: Throwable) {}
+            try { recognizer.destroy() } catch (_: Throwable) {}
         }
     }
 
@@ -300,7 +341,7 @@ fun InputView(
             monitorModeRef[0] = false
         }
         sessionRef[0]++
-        try { speechRecognizer.cancel() } catch (_: Throwable) {}
+        try { speechRecognizer?.cancel() } catch (_: Throwable) {}
         startListeningInternal()
     }
 
@@ -310,7 +351,7 @@ fun InputView(
     LaunchedEffect(isLoading) {
         if (!isLoading && isRecordingState.value && !isAgentSpeaking) {
             sessionRef[0]++
-            try { speechRecognizer.cancel() } catch (_: Throwable) {}
+            try { speechRecognizer?.cancel() } catch (_: Throwable) {}
             startListeningInternal()
         }
     }
@@ -324,7 +365,10 @@ fun InputView(
             canSend = canSend,
             accent = config.appearance.accent,
             textOnAccent = config.appearance.textOnAccent,
-            onCancel = onCancel,
+            onCancel = {
+                dismissTextKeyboard()
+                onCancel()
+            },
             onStopAgent = { userStopAgent() },
             onSend = { doSend() },
         )
@@ -344,9 +388,12 @@ fun InputView(
                     config = config,
                     inputText = inputText,
                     onInputChange = { inputTextState.value = it },
-                    onAddToChat = { showAddToChat = true },
+                    onAddToChat = {
+                        dismissTextKeyboard()
+                        showAddToChat = true
+                    },
                     onSend = { doSend() },
-                    voiceEnabled = config.enableVoice,
+                    voiceEnabled = speechInputAvailable,
                     isRecording = isRecording,
                     autoSendEnabled = autoSendEnabled,
                     countdownProgress = countdownProgress,
@@ -363,7 +410,10 @@ fun InputView(
                         if (isRecording) {
                             stopRecordingFully()
                         } else {
-                            if (!hasAudioPermission) {
+                            dismissTextKeyboard()
+                            if (!speechInputAvailable) {
+                                // Fail closed when local/offline recognition is required but unavailable.
+                            } else if (!hasAudioPermission) {
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 isRecordingState.value = true
@@ -382,8 +432,11 @@ fun InputView(
                     inputText = inputText,
                     onInputChange = { inputTextState.value = it },
                     onSend = { doSend() },
-                    onAddToChat = { showAddToChat = true },
-                    voiceEnabled = config.enableVoice,
+                    onAddToChat = {
+                        dismissTextKeyboard()
+                        showAddToChat = true
+                    },
+                    voiceEnabled = speechInputAvailable,
                     isRecording = isRecording,
                     autoSendEnabled = autoSendEnabled,
                     countdownProgress = countdownProgress,
@@ -400,6 +453,7 @@ fun InputView(
                         if (isRecording) {
                             stopRecordingFully()
                         } else {
+                            dismissTextKeyboard()
                             if (!hasAudioPermission) {
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
@@ -477,6 +531,11 @@ private fun readDocumentAttachment(context: Context, uri: Uri): FileAttachment? 
         type = mime,
         data = bytes,
     )
+}
+
+private fun isLocalSpeechRecognitionAvailable(context: Context): Boolean {
+    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+        SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 }
 
 /** Horizontally scrolling chip row previewing files the user has

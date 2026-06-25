@@ -22,8 +22,9 @@ import kotlinx.coroutines.launch
  * [TTSProvider]. Build via [VoiceFactory.makeController] from a config.
  */
 class VoiceController(
-    private val provider: TTSProvider,
+    private val provider: TTSProvider?,
     enabled: Boolean = true,
+    initialVoiceMode: VoiceMode = if (provider == null) VoiceMode.Disabled else VoiceMode.Local,
     minChars: Int = 40,
     maxChars: Int = 240,
     private val scope: CoroutineScope = MainScope(),
@@ -32,7 +33,10 @@ class VoiceController(
     val isSpeaking = mutableStateOf(false)
 
     /** Whether voice playback is enabled. Compose-observable. */
-    val isEnabled = mutableStateOf(enabled)
+    val isEnabled = mutableStateOf(enabled && provider != null && canEnable(initialVoiceMode))
+
+    /** Remote/local/unavailable/disabled status for host UI. */
+    val voiceMode = mutableStateOf(initialVoiceMode)
 
     /**
      * Rolling buffer of text recently queued for TTS playback. Used by
@@ -81,7 +85,7 @@ class VoiceController(
         chunker.reset()
         drainJob?.cancel()
         drainJob = null
-        provider.cancel()
+        provider?.cancel()
         if (isSpeaking.value) isSpeaking.value = false
         recentSpokenText.value = ""
     }
@@ -98,14 +102,14 @@ class VoiceController(
 
     /** Toggle speech on/off. Disabling stops any current playback. */
     fun setEnabled(enabled: Boolean) {
-        isEnabled.value = enabled
+        isEnabled.value = enabled && provider != null && canEnable(voiceMode.value)
         if (!enabled) stop()
     }
 
     /** Tear down the provider's native resources (TextToSpeech etc.). */
     fun dispose() {
         stop()
-        provider.shutdown()
+        provider?.shutdown()
         scope.cancel()
     }
 
@@ -142,9 +146,14 @@ class VoiceController(
                 val text = queue.removeFirst()
                 appendRecentSpoken(text)
                 if (!isSpeaking.value) isSpeaking.value = true
+                val activeProvider = provider
+                if (activeProvider == null) {
+                    queue.clear()
+                    break
+                }
                 val opts = TTSSpeakOptions(emotion = currentEmotion)
                 try {
-                    provider.speak(text, opts)
+                    activeProvider.speak(text, opts)
                 } catch (ce: CancellationException) {
                     queue.clear()
                     throw ce
@@ -152,6 +161,8 @@ class VoiceController(
                     // Non-cancel error: drop the queue so the user isn't
                     // bombarded by stale audio after recovery, but keep
                     // the controller usable for the next turn.
+                    voiceMode.value = VoiceMode.Unavailable(t.message ?: "Voice output unavailable")
+                    isEnabled.value = false
                     queue.clear()
                     break
                 }
@@ -160,5 +171,11 @@ class VoiceController(
             if (isSpeaking.value) isSpeaking.value = false
             drainJob = null
         }
+    }
+
+    private fun canEnable(mode: VoiceMode): Boolean = when (mode) {
+        VoiceMode.Remote, VoiceMode.Local -> true
+        VoiceMode.Disabled -> false
+        is VoiceMode.Unavailable -> false
     }
 }

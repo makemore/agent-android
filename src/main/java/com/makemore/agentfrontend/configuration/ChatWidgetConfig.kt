@@ -1,6 +1,10 @@
 package com.makemore.agentfrontend.configuration
 
 import androidx.compose.ui.graphics.Color
+import com.makemore.agentfrontend.voice.LocalVoiceGenderPreference
+import com.makemore.agentfrontend.voice.SpeechInputPolicy
+import com.makemore.agentfrontend.voice.TTSProviderPolicy
+import java.util.Locale
 
 /**
  * Configuration for the chat widget.
@@ -87,6 +91,12 @@ data class ChatWidgetConfig(
     val enableTTS: Boolean = false,
     /** Enable voice input */
     val enableVoice: Boolean = true,
+    /** Policy for choosing remote vs local/system TTS. In private-only mode,
+     *  [TTSProviderPolicy.AUTOMATIC] resolves to [TTSProviderPolicy.LOCAL_ONLY]. */
+    val ttsProviderPolicy: TTSProviderPolicy = TTSProviderPolicy.AUTOMATIC,
+    /** Policy for speech input privacy. In private-only mode,
+     *  [SpeechInputPolicy.AUTOMATIC] resolves to [SpeechInputPolicy.LOCAL_ONLY]. */
+    val speechInputPolicy: SpeechInputPolicy = SpeechInputPolicy.AUTOMATIC,
     /** Enable file attachments */
     val enableFiles: Boolean = true,
     /** Gates the composer model selector. When `true` the Anthropic
@@ -184,6 +194,12 @@ data class ChatWidgetConfig(
     /** Optional ElevenLabs model override (e.g. `eleven_turbo_v2_5`).
      *  `null` lets the provider/proxy pick. */
     val voiceModelId: String? = null,
+    /** Preferred Android TTS engine package for local speech (for example, Google Speech Services). */
+    val localTtsEnginePackageName: String? = null,
+    /** Preferred locale for Android on-device TTS voices. Used only by the local TextToSpeech provider; unavailable locales fall back safely. */
+    val localVoiceLocale: Locale? = null,
+    /** Best-effort gender preference for Android on-device TTS voices. Android engines expose gender inconsistently, so this is applied as a hint. */
+    val localVoiceGenderPreference: LocalVoiceGenderPreference = LocalVoiceGenderPreference.MALE,
 
     // -- Callbacks --
     /** Event callback for SSE events */
@@ -241,5 +257,19 @@ data class ChatWidgetConfig(
     /** Configure UI options */
     fun withUI(showTasks: Boolean = true, showModelSelector: Boolean = false): ChatWidgetConfig =
         copy(showTasksTab = showTasks, showModelSelector = showModelSelector)
+
+    val effectiveTtsProviderPolicy: TTSProviderPolicy
+        get() = if (privateOnly && ttsProviderPolicy == TTSProviderPolicy.AUTOMATIC) {
+            TTSProviderPolicy.LOCAL_ONLY
+        } else {
+            ttsProviderPolicy
+        }
+
+    val effectiveSpeechInputPolicy: SpeechInputPolicy
+        get() = if (privateOnly && speechInputPolicy == SpeechInputPolicy.AUTOMATIC) {
+            SpeechInputPolicy.LOCAL_ONLY
+        } else {
+            speechInputPolicy
+        }
 }
 

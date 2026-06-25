@@ -1,5 +1,47 @@
 package com.makemore.agentfrontend.voice
 
+/** Policy used to choose how assistant text is converted to speech. */
+enum class TTSProviderPolicy {
+    /** Backwards-compatible behavior; private/protected mode biases local-only. */
+    AUTOMATIC,
+    /** Remote/provider-backed TTS only. Blocked in private-only mode. */
+    REMOTE,
+    /** Android TextToSpeech/local voices only; never sends text to the network. */
+    LOCAL_ONLY,
+    /** Do not create a voice provider. */
+    DISABLED,
+}
+
+/** Policy used to choose speech-recognition privacy behavior for mic input. */
+enum class SpeechInputPolicy {
+    /** Backwards-compatible behavior; private/protected mode biases local-only. */
+    AUTOMATIC,
+    /** Allow platform remote speech recognition when the OS chooses it. */
+    REMOTE,
+    /** Require on-device/offline recognition. Disable mic if unavailable. */
+    LOCAL_ONLY,
+    /** Hide/disable mic input. */
+    DISABLED,
+}
+
+/** Best-effort gender preference for Android on-device TTS voices. */
+enum class LocalVoiceGenderPreference {
+    /** Do not prefer voices by gender. */
+    ANY,
+    /** Prefer local voices whose engine metadata/name suggests a male voice. */
+    MALE,
+    /** Prefer local voices whose engine metadata/name suggests a female voice. */
+    FEMALE,
+}
+
+/** Host-visible voice output status. */
+sealed class VoiceMode {
+    data object Remote : VoiceMode()
+    data object Local : VoiceMode()
+    data class Unavailable(val reason: String) : VoiceMode()
+    data object Disabled : VoiceMode()
+}
+
 /**
  * Affective metadata attached to an assistant message or delta.
  *

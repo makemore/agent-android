@@ -111,6 +111,7 @@ The default `backendUrl` is `http://10.0.2.2:8000` — the standard Android-emul
 import androidx.compose.ui.graphics.Color
 import com.makemore.agentfrontend.configuration.AuthStrategy
 import com.makemore.agentfrontend.configuration.APIPaths
+import com.makemore.agentfrontend.voice.TTSProviderPolicy
 
 val config = ChatWidgetConfig(
     backendUrl = "https://your-api.com",
@@ -127,6 +128,8 @@ val config = ChatWidgetConfig(
     showModelSelector = false,
     enableFiles      = true,
     enableVoice      = true,
+    enableTTS        = true,
+    ttsProviderPolicy = TTSProviderPolicy.AUTOMATIC,
 
     // Authentication
     authStrategy = AuthStrategy.JWT,
@@ -139,6 +142,42 @@ val config = ChatWidgetConfig(
     )
 )
 ```
+
+### Privacy-safe voice output
+
+Normal mode keeps the existing remote/provider-backed voice behavior when the
+Django voice proxy is configured:
+
+```kotlin
+val normal = ChatWidgetConfig(
+    enableTTS = true,
+    ttsProviderPolicy = TTSProviderPolicy.AUTOMATIC,
+)
+```
+
+Protected/private mode should use Android `TextToSpeech` local voices so
+assistant message text never goes to ElevenLabs or another remote TTS provider:
+
+```kotlin
+val protected = ChatWidgetConfig(
+    privateOnly = true,
+    enableTTS = true,
+    ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY,
+)
+```
+
+`privateOnly = true` also makes `AUTOMATIC` resolve to local/system TTS. In
+that mode the library does not request `/voice/token/` and does not call
+`/voice/tts/`. Host apps can inspect `VoiceController.voiceMode.value` to show
+states such as “Using device voice in Protected AI Mode”, “Voice unavailable
+because no local voice is installed”, or “Voice disabled in Protected AI Mode”.
+
+Local/system voice quality depends on the OS, installed engines, and device; it
+will not match ElevenLabs quality. Android local TTS defaults to a best-effort
+male/masculine voice when the installed engine exposes one, then safely falls
+back to the best local voice for the device locale. Speech input also has
+`speechInputPolicy`; protected mode defaults to on-device/offline recognition
+and disables the mic when Android cannot provide it.
 
 ### Auth Strategies
 

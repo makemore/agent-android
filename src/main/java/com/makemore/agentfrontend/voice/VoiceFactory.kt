@@ -6,6 +6,18 @@ import com.makemore.agentfrontend.networking.APIClient
 import com.makemore.agentfrontend.voice.providers.AndroidTTSProvider
 import com.makemore.agentfrontend.voice.providers.ElevenLabsTTSProvider
 
+enum class VoiceProviderKind { REMOTE, LOCAL, NONE }
+
+data class VoiceProviderPlan(
+    val kind: VoiceProviderKind,
+    val mode: VoiceMode,
+)
+
+data class VoiceProviderResolution(
+    val provider: TTSProvider?,
+    val mode: VoiceMode,
+)
+
 /**
  * Factory for building a default [TTSProvider] from the widget config +
  * [APIClient].
@@ -15,22 +27,74 @@ import com.makemore.agentfrontend.voice.providers.ElevenLabsTTSProvider
  *   2. [AndroidTTSProvider] (always available on Android API 21+).
  */
 object VoiceFactory {
-    fun makeDefaultProvider(
+    fun plan(config: ChatWidgetConfig, apiClientAvailable: Boolean = true): VoiceProviderPlan {
+        if (config.ttsProviderPolicy == TTSProviderPolicy.DISABLED) {
+            return VoiceProviderPlan(VoiceProviderKind.NONE, VoiceMode.Disabled)
+        }
+        if (config.privateOnly && config.ttsProviderPolicy == TTSProviderPolicy.REMOTE) {
+            return VoiceProviderPlan(
+                VoiceProviderKind.NONE,
+                VoiceMode.Unavailable("Remote voice is disabled in Protected AI Mode"),
+            )
+        }
+        return when (config.effectiveTtsProviderPolicy) {
+            TTSProviderPolicy.LOCAL_ONLY -> VoiceProviderPlan(VoiceProviderKind.LOCAL, VoiceMode.Local)
+            TTSProviderPolicy.REMOTE -> {
+                if (apiClientAvailable && config.apiPaths.voiceToken != null) {
+                    VoiceProviderPlan(VoiceProviderKind.REMOTE, VoiceMode.Remote)
+                } else {
+                    VoiceProviderPlan(
+                        VoiceProviderKind.NONE,
+                        VoiceMode.Unavailable("Remote voice endpoint is not configured"),
+                    )
+                }
+            }
+            TTSProviderPolicy.AUTOMATIC -> {
+                if (apiClientAvailable && config.apiPaths.voiceToken != null) {
+                    VoiceProviderPlan(VoiceProviderKind.REMOTE, VoiceMode.Remote)
+                } else {
+                    VoiceProviderPlan(VoiceProviderKind.LOCAL, VoiceMode.Local)
+                }
+            }
+            TTSProviderPolicy.DISABLED -> VoiceProviderPlan(VoiceProviderKind.NONE, VoiceMode.Disabled)
+        }
+    }
+
+    fun resolveProvider(
         context: Context,
         config: ChatWidgetConfig,
-        apiClient: APIClient,
+        apiClient: APIClient?,
         voiceId: String? = null,
         modelId: String? = null,
-    ): TTSProvider {
-        return if (config.apiPaths.voiceToken != null) {
-            ElevenLabsTTSProvider(
-                apiClient = apiClient,
+    ): VoiceProviderResolution {
+        val plan = plan(config, apiClientAvailable = apiClient != null)
+        val provider = when (plan.kind) {
+            VoiceProviderKind.REMOTE -> ElevenLabsTTSProvider(
+                apiClient = requireNotNull(apiClient),
                 defaultVoiceId = voiceId,
                 defaultModelId = modelId,
             )
-        } else {
-            AndroidTTSProvider(context = context, defaultVoiceId = voiceId)
+            VoiceProviderKind.LOCAL -> AndroidTTSProvider(
+                context = context,
+                defaultVoiceId = voiceId,
+                localOnly = config.effectiveTtsProviderPolicy == TTSProviderPolicy.LOCAL_ONLY,
+                enginePackageName = config.localTtsEnginePackageName,
+                preferredLocale = config.localVoiceLocale ?: java.util.Locale.getDefault(),
+                genderPreference = config.localVoiceGenderPreference,
+            )
+            VoiceProviderKind.NONE -> null
         }
+        return VoiceProviderResolution(provider = provider, mode = plan.mode)
+    }
+
+    fun makeDefaultProvider(
+        context: Context,
+        config: ChatWidgetConfig,
+        apiClient: APIClient?,
+        voiceId: String? = null,
+        modelId: String? = null,
+    ): TTSProvider? {
+        return resolveProvider(context, config, apiClient, voiceId, modelId).provider
     }
 
     /**
@@ -41,11 +105,15 @@ object VoiceFactory {
     fun makeController(
         context: Context,
         config: ChatWidgetConfig,
-        apiClient: APIClient,
+        apiClient: APIClient?,
         voiceId: String? = null,
         modelId: String? = null,
     ): VoiceController {
-        val provider = makeDefaultProvider(context, config, apiClient, voiceId, modelId)
-        return VoiceController(provider = provider, enabled = config.enableTTS)
+        val resolved = resolveProvider(context, config, apiClient, voiceId, modelId)
+        return VoiceController(
+            provider = resolved.provider,
+            enabled = config.enableTTS,
+            initialVoiceMode = resolved.mode,
+        )
     }
 }
