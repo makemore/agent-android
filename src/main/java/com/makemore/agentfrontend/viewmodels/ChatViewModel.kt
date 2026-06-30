@@ -487,7 +487,7 @@ class ChatViewModel(
             try {
                 runState.value = RunState.CANCELLING
                 apiClient.cancelRun(runId)
-                sseClient?.disconnect()
+                sseClient?.disconnect(DisconnectReason.EXPLICIT)
                 sseClient = null
                 // Drop any buffered-but-not-yet-drained characters and stop the
                 // typewriter loop. Without this, the drain job keeps revealing
@@ -874,7 +874,13 @@ class ChatViewModel(
     // -- SSE Event Handling --
 
     private suspend fun subscribeToEvents(runId: String) {
-        sseClient?.disconnect()
+        // Tear down any prior run's stream. This is hit both when a
+        // user cancels (see `cancelRun`) and when a new run replaces
+        // a prior one. Both are client-initiated closes, so we
+        // surface `EXPLICIT`; the host can disambiguate "user
+        // cancelled" from "new run started" by tracking the runId
+        // they passed to `cancelRun`.
+        sseClient?.disconnect(DisconnectReason.EXPLICIT)
 
         val eventPath = config.apiPaths.runEventsUrl(runId)
         var urlString = "${config.backendUrl}$eventPath"
@@ -911,7 +917,16 @@ class ChatViewModel(
             resolveStreamCompletion()
         }
 
-        client.connect(urlString, apiClient.authHeaders())
+        // Forward the host-configured onDisconnect through the SSE
+        // owner. The SSEClient fires this exactly once per run with
+        // a classified reason. The library does NOT do any networking
+        // in response — it just signals.
+        val onDisconnect = config.onDisconnect
+        client.onDisconnect = { disconnectedRunId, reason ->
+            onDisconnect?.invoke(disconnectedRunId, reason)
+        }
+
+        client.connect(urlString, apiClient.authHeaders(), runId)
 
         // Suspend until terminal state. Safe under structured concurrency:
         // if the parent coroutine is cancelled, the await throws and the
@@ -1365,7 +1380,11 @@ class ChatViewModel(
         }
 
         isLoading.value = false
-        sseClient?.disconnect()
+        // The server asked us to pause (required action / run.suspended).
+        // The run continues server-side; we're dropping the socket
+        // because the user is no longer actively watching. This is a
+        // LIFECYCLE teardown from the backend's perspective.
+        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
         sseClient = null
         currentRunId = null
         runState.value = RunState.WAITING
@@ -1458,7 +1477,15 @@ class ChatViewModel(
         }
 
         isLoading.value = false
-        sseClient?.disconnect()
+        // Terminal event arrived (`run.succeeded` / `run.failed` /
+        // `run.cancelled` / `run.timed_out`). The run is over
+        // server-side; the client is just dropping the now-idle
+        // socket. Map to `LIFECYCLE` — the run itself reached end
+        // of life. Hosts that need to distinguish "I cancelled"
+        // from "the server finished" can track which runId they
+        // passed to `cancelRun` and ignore the callback for
+        // unrecognised ids.
+        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
         sseClient = null
         currentRunId = null
 
@@ -1672,6 +1699,18 @@ class ChatViewModel(
             timestamp = timestamp,
             type = MessageType.MESSAGE
         ))
+    }
+
+    /**
+     * Tear down any in-flight SSE stream when the VM is cleared. The
+     * run continues server-side; this is a `LIFECYCLE` teardown
+     * from the backend's perspective — the user has navigated away.
+     * `disconnect(reason:)` is no-op if no client is attached, so
+     * this is safe to call unconditionally.
+     */
+    override fun onCleared() {
+        super.onCleared()
+        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
     }
 }
 

@@ -47,9 +47,9 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:3.0.0")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:3.0.1")   // Compose UI + headless core
     // or, headless only:
-    // implementation("com.github.makemore.agent-android:agent-client:3.0.0")
+    // implementation("com.github.makemore.agent-android:agent-client:3.0.1")
 }
 ```
 
@@ -273,6 +273,16 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### 3.0.1
+
+**`onDisconnect` callback**
+
+- **New `onDisconnect` on `ChatWidgetConfig`** — optional `((String, DisconnectReason) -> Unit)?` fired exactly once per run when the SSE stream is torn down. The first argument is the `runId` of the stream that just closed; the second classifies the teardown so the host can distinguish a user-driven cancel (`DisconnectReason.EXPLICIT`) from a network failure (`DisconnectReason.NETWORK`) or a view/VM/OS lifecycle event (`DisconnectReason.LIFECYCLE`). The library does not perform any network call in response — this is purely a signal for the host to decide what to do (e.g. notify a backend that the user left). Default `null` preserves the existing behaviour.
+- **`DisconnectReason` enum** — new public type in the `agent-client` module with cases `EXPLICIT`, `NETWORK`, `LIFECYCLE`, `ERROR`. Mirrors the iOS enum and the web `DisconnectReason` union.
+- **`SSEClient.disconnect(reason:)`** — signature extended from `disconnect()` to `disconnect(reason: DisconnectReason = DisconnectReason.EXPLICIT)`. Callers (the view model) choose the reason; the SSE owner no longer has enough context to distinguish "user cancelled" from "view disappeared". A `hasFiredDisconnect` guard ensures the callback fires at most once per run. The callback is delivered on `Dispatchers.Main` under `NonCancellable` so a host cancelling its own scope in response doesn't suppress the signal.
+- **`ChatViewModel`** — passes `runId` into `SSEClient.connect(url, headers, runId)`, forwards `config.onDisconnect` to the SSE owner's callback, and tags each of the four `sseClient?.disconnect()` call sites with the right reason: `EXPLICIT` from `cancelRun()` and the new-run-replaces-prior path, `LIFECYCLE` from terminal `run.suspended` / `client.action.required` and from a terminal `run.succeeded` / `run.failed` / `run.cancelled` / `run.timed_out`. A new `onCleared()` override on `ChatViewModel` calls `sseClient?.disconnect(DisconnectReason.LIFECYCLE)` so VM teardown also produces a clean lifecycle signal.
+- **Additive** — no breaking changes. Default `onDisconnect = null` makes the entire feature a no-op for existing consumers; every existing call site (`sseClient?.disconnect()`) continues to compile and behave identically.
 
 ### 3.0.0
 

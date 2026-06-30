@@ -1,6 +1,7 @@
 package com.makemore.agentfrontend.configuration
 
 import androidx.compose.ui.graphics.Color
+import com.makemore.agentfrontend.networking.DisconnectReason
 import com.makemore.agentfrontend.voice.LocalVoiceGenderPreference
 import com.makemore.agentfrontend.voice.SpeechInputPolicy
 import com.makemore.agentfrontend.voice.TTSProviderPolicy
@@ -226,14 +227,28 @@ data class ChatWidgetConfig(
     /**
      * Fires exactly once per conversation lifetime, when the first
      * assistant message becomes visible in `messages` — whether it arrives
-     * via streaming deltas, a non-streaming `assistant.message` snap, or a
-     * host call to
+     * via streaming deltas, a non-streaming `assistant.message` snap, or
+     * a host call to
      * [com.makemore.agentfrontend.viewmodels.ChatViewModel.appendAssistantMessage].
      * Suppressed when an existing conversation already containing assistant
      * messages is restored. Useful for dismissing splash screens or
      * chaining onboarding steps once S'Ai has actually spoken.
      */
-    val onFirstAssistantMessage: ((String) -> Unit)? = null
+    val onFirstAssistantMessage: ((String) -> Unit)? = null,
+    /**
+     * Fired exactly once per run, the moment the SSE stream is torn
+     * down. The first argument is the runId of the stream that just
+     * closed; the second classifies the teardown so the host can
+     * distinguish a user-driven cancel ([DisconnectReason.EXPLICIT])
+     * from a network failure ([DisconnectReason.NETWORK]) or a view /
+     * VM / OS lifecycle event ([DisconnectReason.LIFECYCLE]). The
+     * library does not perform any network call in response — this is
+     * purely a signal for the host to decide what to do (e.g. notify
+     * a backend that the user left). Default `null` preserves the
+     * existing behaviour where the library does nothing on stream
+     * teardown.
+     */
+    val onDisconnect: ((String, DisconnectReason) -> Unit)? = null
 ) {
     companion object {
         /** Create a configuration with common settings */
