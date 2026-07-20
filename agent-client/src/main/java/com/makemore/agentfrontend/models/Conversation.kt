@@ -14,7 +14,15 @@ data class Conversation(
     val messages: List<APIMessage>? = null,
     val hasMore: Boolean? = null,
     val createdAt: String? = null,
-    val updatedAt: String? = null
+    val updatedAt: String? = null,
+    /**
+     * Server-persisted conversation metadata. The runtime stamps the
+     * latest `context.usage` snapshot here at the end of a
+     * successful run so a reloaded conversation can show the
+     * freshest known token count + active model + `context_window`
+     * without re-running an LLM call.
+     */
+    val metadata: JsonObject? = null,
 )
 
 /** API message format (for decoding from backend) */

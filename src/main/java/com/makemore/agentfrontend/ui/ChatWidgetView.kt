@@ -111,6 +111,22 @@ fun ChatWidgetView(
                 )
             }
 
+            // Context-usage banner. Server-driven: renders only when
+            // the runtime has shipped at least one `context.usage`
+            // event for this conversation (i.e. `contextTokens` is
+            // non-null on the view model). The denominator and
+            // progress bar appear when the runtime also shipped a
+            // `context_window` for the active model. There is no
+            // client-side estimation — the banner stays hidden until
+            // the server has something to show.
+            viewModel.contextTokens.value?.let { tokens ->
+                ContextUsageBanner(
+                    totalTokens = tokens,
+                    contextWindow = viewModel.contextWindow.value,
+                    modelId = viewModel.contextModelId.value,
+                )
+            }
+
             // Messages list. `agentIsSpeaking` propagates the TTS
             // playback state to the latest assistant row so its avatar
             // glows while audio is in flight. The S'Ai orb is rendered

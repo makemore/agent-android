@@ -13,6 +13,7 @@ private val AGENT_STREAM_KNOWN_TYPES = setOf(
     "client.action.required", "run.heartbeat", "state.checkpoint",
     "step.started", "step.completed", "step.failed", "step.skipped",
     "step.retrying", "progress.update", "memory.update",
+    "context.usage",
 )
 
 data class AgentStreamEvent(

@@ -62,6 +62,38 @@ class ChatViewModel(
      *  subAgentActivity`. */
     val subAgentActivity = mutableStateOf(SubAgentActivityState())
 
+    // -- Context Usage (banner state) --
+    /**
+     * Total tokens used so far in this conversation, as last reported
+     * by the server's `context.usage` SSE event. `null` until the first
+     * event arrives (or after a reload when the conversation has no
+     * stored snapshot). The runtime emits one after every LLM call with
+     * cumulative numbers, so this is the single source of truth for the
+     * context-usage banner — no client-side estimation.
+     *
+     * Compose-friendly [mutableStateOf] so the banner re-renders the
+     * instant the server reports usage. Mirrors the iOS `@Published
+     * contextTokens`.
+     */
+    val contextTokens = mutableStateOf<Int?>(null)
+
+    /**
+     * `context_window` for the active model, as reported by the most
+     * recent `context.usage` event (the runtime stamps it per-event so
+     * a model switch mid-conversation takes effect on the very next
+     * event). `null` when the runtime has not shipped a `context_window`
+     * for the active model.
+     */
+    val contextWindow = mutableStateOf<Int?>(null)
+
+    /**
+     * Identifier of the model the most recent `context.usage` event
+     * was billed against. Lets the UI distinguish a real model change
+     * (the model id differs from the current picker selection) from
+     * the same model sending another event.
+     */
+    val contextModelId = mutableStateOf<String?>(null)
+
     // -- System State --
     val systems = mutableStateListOf<AgentSystem>()
     val selectedSystemSlug = mutableStateOf<String?>(null)
@@ -536,7 +568,73 @@ class ChatViewModel(
         // with thinking off — matches the iOS behaviour.
         extendedThinking.value = false
         firstAssistantMessageFired = false
+        // Reset context-usage state — the previous conversation's
+        // banner values are no longer relevant. The next `sendMessage`
+        // will produce a fresh `context.usage` event from the runtime.
+        contextTokens.value = null
+        contextWindow.value = null
+        contextModelId.value = null
         storage.set(config.conversationIdKey, null)
+    }
+
+    /**
+     * Apply a `context.usage` event from the server. The runtime emits
+     * one of these after every LLM call with cumulative totals for the
+     * whole conversation, plus the active model's `context_window` and
+     * `model_id`. The client just mirrors whatever the server says —
+     * no estimation, no heuristics. Subsequent events overwrite
+     * earlier ones, so the banner always shows the freshest state.
+     *
+     * Number-typed JSON values may decode as `Int` or `Double`
+     * depending on the SSE parser, so both are accepted.
+     */
+    fun applyContextUsage(payload: Map<String, Any?>) {
+        val total: Int? = (payload["total_tokens"] as? Int)
+            ?: (payload["total_tokens"] as? Double)?.toInt()
+            ?: combinedTokens(payload)
+        contextTokens.value = total
+        (payload["context_window"] as? Int)?.let { contextWindow.value = it }
+            ?: (payload["context_window"] as? Double)?.toInt()?.let { contextWindow.value = it }
+        (payload["model_id"] as? String)?.let { contextModelId.value = it }
+    }
+
+    private fun combinedTokens(payload: Map<String, Any?>): Int? {
+        val prompt = (payload["prompt_tokens"] as? Int)
+            ?: (payload["prompt_tokens"] as? Double)?.toInt()
+        val completion = (payload["completion_tokens"] as? Int)
+            ?: (payload["completion_tokens"] as? Double)?.toInt()
+        return if (prompt != null && completion != null) prompt + completion else null
+    }
+
+    /**
+     * Restore the context-usage banner state from a server-persisted
+     * `last_context_usage` snapshot. Called by `loadConversation`
+     * after the message list has been hydrated so the banner shows
+     * the freshest known token count immediately, before the next
+     * LLM call has a chance to ship a fresh `context.usage` event.
+     * Missing / malformed fields fall back to nil (banner stays
+     * hidden) — never crashes the load.
+     */
+    private fun applySnapshotFromMetadata(metadata: kotlinx.serialization.json.JsonObject?) {
+        val meta = metadata?.get("last_context_usage") as? kotlinx.serialization.json.JsonObject
+        if (meta == null) {
+            contextTokens.value = null
+            contextWindow.value = null
+            contextModelId.value = null
+            return
+        }
+        // `JsonPrimitive.content` returns the raw string for both
+        // numbers and strings; coerce carefully so a server that
+        // serialises `total_tokens` as `120900` (number) and
+        // `model_id` as `"claude-sonnet-4-6"` (string) both decode.
+        contextTokens.value = (meta["total_tokens"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content?.toIntOrNull()
+        contextWindow.value = (meta["context_window"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content?.toIntOrNull()
+        (meta["model_id"] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.content
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { contextModelId.value = it }
     }
 
     /**
@@ -803,6 +901,14 @@ class ChatViewModel(
                 // Suppress the first-assistant lifecycle hook for restored
                 // conversations that already contain an assistant turn.
                 firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
+                // Restore the last `context.usage` snapshot the runtime
+                // stamped on `AgentConversation.metadata` at the end of
+                // the previous run. Lets the banner show the freshest
+                // known token count immediately, before the next LLM
+                // call has a chance to ship a fresh `context.usage`
+                // event. Missing / malformed fields fall back to nil
+                // (banner stays hidden) — never crashes the load.
+                applySnapshotFromMetadata(conversation.metadata)
             } catch (e: NotFound) {
                 conversationId.value = null
                 storage.set(config.conversationIdKey, null)
@@ -961,6 +1067,7 @@ class ChatViewModel(
             "content.blocks" -> handleContentBlocks(payload)
             "custom" -> handleCustomEvent(payload)
             "memory.update" -> handleMemoryUpdate(payload)
+            "context.usage" -> applyContextUsage(payload)
             "client.action.required", "run.suspended" -> handleRequiredAction(payload)
             "run.succeeded", "run.failed", "run.cancelled", "run.timed_out" -> handleTerminalEvent(event.type, payload)
         }

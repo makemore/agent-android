@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -143,90 +144,105 @@ fun MessageView(
                     .background(bubbleColor)
                     .padding(12.dp)
             ) {
-                // Tool/system message icon + name
-                if (isToolMessage || isSystem) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        MessageIcon(message)
-                        message.metadata?.toolName?.let {
-                            Text(it, style = MaterialTheme.typography.labelSmall, color = textColor.copy(alpha = 0.7f))
+                // SelectionContainer gives the bubble the native Android
+                // long-press → drag-handles → copy flow on the *inner text*,
+                // so the user can pick a specific range rather than copying
+                // the whole message. The bubble's background, padding, and
+                // surrounding layout are outside the container so they
+                // don't become part of the selection region. The
+                // `contextMenuBuilder` arg is intentionally left at its
+                // default — the existing context menu in the host layer
+                // (long-press on a chat row) is unaffected.
+                SelectionContainer {
+                    Column {
+                        // Tool/system message icon + name
+                        if (isToolMessage || isSystem) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                MessageIcon(message)
+                                message.metadata?.toolName?.let {
+                                    Text(it, style = MaterialTheme.typography.labelSmall, color = textColor.copy(alpha = 0.7f))
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        // Render assistant messages as markdown once the stream
+                        // finishes; during streaming use plain Text so the bubble
+                        // doesn't reflow on every delta as the Markdown parser
+                        // re-interprets partial syntax (e.g. `**hello` -> `**hello**`).
+                        if (!isUser && !isToolMessage && !isSystem && message.content.isNotBlank() && !message.isStreaming) {
+                            val isDark = isSystemInDarkTheme()
+                            val highlights = remember(isDark) {
+                                Highlights.Builder().theme(SyntaxThemes.atom(darkMode = isDark))
+                            }
+
+                            Markdown(
+                                content = message.content,
+                                colors = markdownColor(
+                                    text = textColor,
+                                    linkText = linkColor,
+                                    codeBackground = textColor.copy(alpha = 0.08f),
+                                    inlineCodeBackground = textColor.copy(alpha = 0.08f),
+                                    dividerColor = textColor.copy(alpha = 0.2f),
+                                ),
+                                typography = markdownTypography(
+                                    h1 = MaterialTheme.typography.titleLarge.copy(color = textColor),
+                                    h2 = MaterialTheme.typography.titleMedium.copy(color = textColor),
+                                    h3 = MaterialTheme.typography.titleSmall.copy(color = textColor),
+                                    h4 = MaterialTheme.typography.bodyLarge.copy(color = textColor),
+                                    h5 = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    h6 = MaterialTheme.typography.bodySmall.copy(color = textColor),
+                                    text = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    paragraph = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    ordered = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    bullet = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    list = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                    code = MaterialTheme.typography.bodySmall.copy(color = textColor),
+                                ),
+                                components = markdownComponents(
+                                    codeBlock = {
+                                        MarkdownHighlightedCodeBlock(
+                                            content = it.content,
+                                            node = it.node,
+                                            highlights = highlights,
+                                        )
+                                    },
+                                    codeFence = {
+                                        MarkdownHighlightedCodeFence(
+                                            content = it.content,
+                                            node = it.node,
+                                            highlights = highlights,
+                                        )
+                                    },
+                                ),
+                            )
+                        } else {
+                            Text(
+                                text = message.content,
+                                color = textColor,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+
+                        if (message.type == MessageType.REQUIRED_ACTION) {
+                            message.metadata?.actionLabel?.let { label ->
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = label,
+                                    color = linkColor,
+                                    style = MaterialTheme.typography.labelLarge
+                                )
+                            }
                         }
                     }
-                    Spacer(modifier = Modifier.height(4.dp))
                 }
 
-                // Render assistant messages as markdown once the stream
-                // finishes; during streaming use plain Text so the bubble
-                // doesn't reflow on every delta as the Markdown parser
-                // re-interprets partial syntax (e.g. `**hello` -> `**hello**`).
-                if (!isUser && !isToolMessage && !isSystem && message.content.isNotBlank() && !message.isStreaming) {
-                    val isDark = isSystemInDarkTheme()
-                    val highlights = remember(isDark) {
-                        Highlights.Builder().theme(SyntaxThemes.atom(darkMode = isDark))
-                    }
-
-                    Markdown(
-                        content = message.content,
-                        colors = markdownColor(
-                            text = textColor,
-                            linkText = linkColor,
-                            codeBackground = textColor.copy(alpha = 0.08f),
-                            inlineCodeBackground = textColor.copy(alpha = 0.08f),
-                            dividerColor = textColor.copy(alpha = 0.2f),
-                        ),
-                        typography = markdownTypography(
-                            h1 = MaterialTheme.typography.titleLarge.copy(color = textColor),
-                            h2 = MaterialTheme.typography.titleMedium.copy(color = textColor),
-                            h3 = MaterialTheme.typography.titleSmall.copy(color = textColor),
-                            h4 = MaterialTheme.typography.bodyLarge.copy(color = textColor),
-                            h5 = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            h6 = MaterialTheme.typography.bodySmall.copy(color = textColor),
-                            text = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            paragraph = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            ordered = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            bullet = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            list = MaterialTheme.typography.bodyMedium.copy(color = textColor),
-                            code = MaterialTheme.typography.bodySmall.copy(color = textColor),
-                        ),
-                        components = markdownComponents(
-                            codeBlock = {
-                                MarkdownHighlightedCodeBlock(
-                                    content = it.content,
-                                    node = it.node,
-                                    highlights = highlights,
-                                )
-                            },
-                            codeFence = {
-                                MarkdownHighlightedCodeFence(
-                                    content = it.content,
-                                    node = it.node,
-                                    highlights = highlights,
-                                )
-                            },
-                        ),
-                    )
-                } else {
-                    Text(
-                        text = message.content,
-                        color = textColor,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-
-                if (message.type == MessageType.REQUIRED_ACTION) {
-                    message.metadata?.actionLabel?.let { label ->
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = label,
-                            color = linkColor,
-                            style = MaterialTheme.typography.labelLarge
-                        )
-                    }
-                }
-
-                // Debug info
+                // Debug info (outside SelectionContainer — it's metadata
+                // and we don't want it to be part of any selection range
+                // from the message body).
                 val meta = message.metadata
                 if (showDebug && meta?.arguments != null) {
                     Spacer(modifier = Modifier.height(4.dp))

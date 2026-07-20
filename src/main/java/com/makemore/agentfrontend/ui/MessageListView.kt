@@ -10,7 +10,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
@@ -20,8 +19,18 @@ import com.makemore.agentfrontend.models.MessageType
 import com.makemore.agentfrontend.models.SubAgentActivityState
 
 /**
- * Message list view with auto-scroll behavior.
- * Mirrors the iOS MessageListView struct.
+ * Message list view. One automated scroll only: when the user sends a
+ * message, the list scrolls so the just-sent user message lands at the
+ * top of the viewport, and the agent's reply streams into the reserved
+ * space below it (ChatGPT-style). No other auto-scroll — streaming
+ * text growth never moves the list, so the user stays in control.
+ *
+ * The mechanism mirrors the iOS `MessageListView`: the "current turn"
+ * (last user message + everything after it + the status indicator) is
+ * rendered as a single item with `minHeight == viewport height`, so
+ * the LazyColumn always has enough content below the user message to
+ * bring it to the top (otherwise the scroll clamps at the bottom of
+ * the content and visibly no-ops).
  */
 @Composable
 fun MessageListView(
@@ -58,6 +67,39 @@ fun MessageListView(
         }
     }
 
+    // The "current turn" starts at the last user message. Everything
+    // from there down (plus the status indicator) renders as ONE
+    // LazyColumn item whose minHeight is the viewport height — see
+    // the class doc. Head rows keep their own per-message items.
+    val turnStart = displayMessages.indexOfLast { it.second.role == MessageRole.USER }
+
+    // User-submit scroll-to-top. When the new tail message is a user
+    // message, scroll so the turn group (whose top edge is the new
+    // user message) lands at the top of the viewport. The agent's
+    // reply then streams in below — no further auto-scroll.
+    // Pagination is the only other automated scroll action and is
+    // wired by the host via `onLoadMore`.
+    val lastDisplayMessage = displayMessages.lastOrNull()?.second
+    var lastSeenTailId by remember { mutableStateOf(lastDisplayMessage?.id) }
+    LaunchedEffect(lastDisplayMessage?.id) {
+        val previousTailId = lastSeenTailId
+        lastSeenTailId = lastDisplayMessage?.id
+        if (lastDisplayMessage?.role != MessageRole.USER) return@LaunchedEffect
+        if (lastDisplayMessage.id == previousTailId) return@LaunchedEffect
+        // Skip the transition out of an empty list (conversation
+        // restore / first message of a brand-new conversation) —
+        // mirrors the iOS guard on `previousTailId == nil`.
+        if (previousTailId == null) return@LaunchedEffect
+        if (turnStart < 0) return@LaunchedEffect
+        // The turn group is one item preceded by the head rows and
+        // the optional load-more item. `scrollOffset = 0` anchors
+        // its top edge (the just-sent user message) to the top of
+        // the viewport; the group's minHeight guarantees there is
+        // enough content below for the scroll not to clamp.
+        val turnItemIndex = (if (hasMoreMessages) 1 else 0) + turnStart
+        listState.animateScrollToItem(turnItemIndex, scrollOffset = 0)
+    }
+
     // Resolve once per render: the id of the most recent assistant
     // text message so only its avatar gets the speaking-halo
     // treatment. Skips tool / sub-agent / context / content-block
@@ -74,69 +116,6 @@ fun MessageListView(
         }?.id
     }
 
-    // Auto-scroll behaviour:
-    // - A `followStream` flag tracks whether the list is pinned to the
-    //   bottom. It flips off the moment the user drags upward and flips
-    //   back on only when they scroll to (or past) the last item again.
-    // - A new row (new bubble / tool call / thinking spinner) animates
-    //   scroll when `followStream` is true.
-    // - Streaming content deltas fire at ~30 Hz; while `followStream` is
-    //   true they snap with a non-animated `scrollToItem` anchored to the
-    //   bottom of the last item (scrollOffset = Int.MAX_VALUE). While
-    //   `followStream` is false the snap is skipped entirely so the user
-    //   can read earlier content without being yanked back down.
-    val targetIndex = (displayMessages.size - 1 + (if (isLoading) 1 else 0)).coerceAtLeast(0)
-
-    var followStream by remember { mutableStateOf(true) }
-
-    // Convert the dp threshold to px once per density so the snapshotFlow
-    // body stays cheap. Mirrors iOS ChatWidgetConfig.nearBottomThresholdPt:
-    // the user can scroll up to this many dp away from the bottom and we
-    // still consider the list "at bottom" for streaming auto-follow.
-    val density = LocalDensity.current
-    val thresholdPx = remember(density, config.nearBottomThresholdPt) {
-        with(density) { config.nearBottomThresholdPt.dp.roundToPx() }
-    }
-
-    LaunchedEffect(listState, thresholdPx) {
-        snapshotFlow {
-            val layout = listState.layoutInfo
-            if (layout.totalItemsCount == 0) return@snapshotFlow true
-            val lastVisible = layout.visibleItemsInfo.lastOrNull()
-                ?: return@snapshotFlow false
-            // Last item must be the tail item — if the user has scrolled
-            // far enough that even the last index has dropped off the
-            // visible window, we are clearly not near bottom.
-            if (lastVisible.index < layout.totalItemsCount - 1) return@snapshotFlow false
-            // Overflow: how many px the last item extends below the
-            // viewport bottom. ≤0 means it fits fully (true bottom);
-            // 0..thresholdPx means the user has scrolled up a little but
-            // still wants to follow; >thresholdPx means stop pulling.
-            val lastBottom = lastVisible.offset + lastVisible.size
-            val overflow = lastBottom - layout.viewportEndOffset
-            overflow <= thresholdPx
-        }.collect { atBottom -> followStream = atBottom }
-    }
-
-    LaunchedEffect(displayMessages.size, isLoading) {
-        if ((displayMessages.isNotEmpty() || isLoading) && followStream) {
-            listState.animateScrollToItem(targetIndex, scrollOffset = Int.MAX_VALUE)
-        }
-    }
-
-    val lastContent = displayMessages.lastOrNull()?.second?.content
-    LaunchedEffect(lastContent) {
-        if (displayMessages.isEmpty()) return@LaunchedEffect
-        // Host-app opt-out: when streaming follow is disabled the list
-        // stays put and the user controls scrolling while the reply
-        // generates. New rows (count change, isLoading) are still pinned
-        // by the other LaunchedEffect.
-        if (!config.followStreamingEnabled) return@LaunchedEffect
-        if (followStream && !listState.isScrollInProgress) {
-            listState.scrollToItem(targetIndex, scrollOffset = Int.MAX_VALUE)
-        }
-    }
-
     if (displayMessages.isEmpty() && !isLoading) {
         // Empty state — when the host opts in via `greeting.enabled`
         // we render the warm-dark serif greeting; otherwise we fall
@@ -150,31 +129,14 @@ fun MessageListView(
             }
         }
     } else {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            // Load more button
-            if (hasMoreMessages) {
-                item {
-                    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        if (loadingMoreMessages) {
-                            CircularProgressIndicator(modifier = Modifier.size(24.dp).padding(8.dp))
-                        } else {
-                            TextButton(onClick = onLoadMore) {
-                                Icon(Icons.Default.KeyboardArrowUp, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Load earlier messages", style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                    }
-                }
-            }
+        // BoxWithConstraints supplies the viewport height used as the
+        // current turn's minHeight — see the class doc.
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val viewportHeight = maxHeight
 
-            // Messages
-            itemsIndexed(displayMessages, key = { _, pair -> pair.second.id }) { _, (originalIndex, message) ->
+            // Single message row, shared by the head of the list and
+            // the current-turn group so both render identically.
+            val messageRow: @Composable (Pair<Int, Message>) -> Unit = { (originalIndex, message) ->
                 if (editingIndex == originalIndex) {
                     EditMessageView(
                         text = editText,
@@ -211,16 +173,14 @@ fun MessageListView(
             // narration. Otherwise fall back to the "Thinking…" spinner.
             val pillActive = subAgentActivity.isActive &&
                 config.appearance.subAgentActivityStyle == ChatAppearance.SubAgentActivityStyle.PILL
-            if (pillActive) {
-                item {
+            val statusIndicator: @Composable () -> Unit = {
+                if (pillActive) {
                     SubAgentActivityPillView(
                         activity = subAgentActivity,
                         appearance = config.appearance,
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
                     )
-                }
-            } else if (isLoading) {
-                item {
+                } else if (isLoading) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(16.dp),
                         horizontalArrangement = Arrangement.Center,
@@ -230,6 +190,60 @@ fun MessageListView(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Thinking...", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                }
+            }
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Load more button
+                if (hasMoreMessages) {
+                    item {
+                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            if (loadingMoreMessages) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp).padding(8.dp))
+                            } else {
+                                TextButton(onClick = onLoadMore) {
+                                    Icon(Icons.Default.KeyboardArrowUp, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Load earlier messages", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (turnStart >= 0) {
+                    // Head rows: everything before the current turn.
+                    itemsIndexed(
+                        displayMessages.subList(0, turnStart),
+                        key = { _, pair -> pair.second.id }
+                    ) { _, pair -> messageRow(pair) }
+
+                    // Current turn: last user message + everything after
+                    // it + the status indicator, as one viewport-height
+                    // item so the user-submit scroll never clamps.
+                    item(key = "current-turn-${displayMessages[turnStart].second.id}") {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = viewportHeight - 16.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            displayMessages.subList(turnStart, displayMessages.size).forEach { pair ->
+                                messageRow(pair)
+                            }
+                            statusIndicator()
+                        }
+                    }
+                } else {
+                    itemsIndexed(displayMessages, key = { _, pair -> pair.second.id }) { _, pair ->
+                        messageRow(pair)
+                    }
+                    item { statusIndicator() }
                 }
             }
         }

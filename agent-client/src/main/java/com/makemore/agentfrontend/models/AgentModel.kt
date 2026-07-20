@@ -18,6 +18,18 @@ data class AgentModel(
     @SerialName("supports_thinking") val supportsThinking: Boolean = false,
     @SerialName("supports_tools") val supportsTools: Boolean = true,
     @SerialName("supports_vision") val supportsVision: Boolean = false,
+    /**
+     * Maximum input context in tokens. Sourced from the runtime's
+     * `/api/agent-runtime/models/` response (`context_window` key).
+     * Optional because some hosts / OpenRouter responses may omit the
+     * field; the context-usage banner hides the progress bar in that
+     * case (the count is still shown, just without a denominator).
+     * `default = null` is mandatory: `kotlinx.serialization` skips
+     * absent JSON keys and leaves the property at the default, so
+     * older runtimes (no `context_window` in the response) decode
+     * cleanly without us having to write a custom decoder.
+     */
+    @SerialName("context_window") val contextWindow: Int? = null,
 )
 
 /**

@@ -61,7 +61,6 @@ data class HostConfiguration(
             enableTTS = enableTTS,
             enableVoice = enableVoice,
             enableFiles = true,
-            followStreamingEnabled = true,
         )
         if (anthropicShell) {
             // Library default already enables the warm-dark appearance,

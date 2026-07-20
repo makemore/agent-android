@@ -132,16 +132,6 @@ data class ChatWidgetConfig(
      * to send over a non-HTTPS connection (except to local dev hosts). Only
      * enable for local development against an http:// backend. */
     val allowInsecureHTTP: Boolean = false,
-    val followStreamingEnabled: Boolean = true,
-    /**
-     * How close to the bottom (in dp) the list must be before streaming
-     * deltas are allowed to pull the scroll position down. Once the user
-     * drags more than this distance away from the bottom the auto-follow
-     * pauses until they scroll back. Drop it close to `0f` for strict
-     * follow ("any scroll up disables it"), raise it to ~300f for a
-     * looser feel that ignores small drags. Default `100f` matches iOS.
-     */
-    val nearBottomThresholdPt: Float = 100f,
 
     // -- Authentication --
     /** Authentication strategy */
