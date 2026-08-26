@@ -49,6 +49,7 @@ import android.provider.OpenableColumns
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.util.Log
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.voice.SpeechInputPolicy
 import com.makemore.agentfrontend.models.FileAttachment
@@ -128,6 +129,11 @@ fun InputView(
     val bargeInFiredRef = remember { booleanArrayOf(false) }
     val recentSpokenRef = remember { arrayOf("") }
     val silenceTimerRef = remember { arrayOfNulls<Job>(1) }
+    // Consecutive recognizer errors with no intervening result. A
+    // permanent failure (no language pack for the device locale, say)
+    // fails instantly every time, so recycling on it spins forever with
+    // the mic held open and nothing to show for it.
+    val consecutiveErrorsRef = remember { intArrayOf(0) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -270,6 +276,7 @@ fun InputView(
         val listener = object : RecognitionListener {
             override fun onResults(results: Bundle?) {
                 if (activeSessionRef[0] != sessionRef[0]) return
+                consecutiveErrorsRef[0] = 0
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!monitorModeRef[0] && !matches.isNullOrEmpty()) {
                     val current = inputTextState.value
@@ -303,9 +310,34 @@ fun InputView(
 
             override fun onError(error: Int) {
                 if (activeSessionRef[0] != sessionRef[0]) return
-                // Recycle on transient errors so the always-on mic
-                // survives "no match", "speech timeout", etc.
-                if (isRecordingState.value) startListeningInternal()
+                if (!isRecordingState.value) return
+
+                // Errors that will fail identically on every retry. No
+                // amount of recycling fixes a missing language pack or a
+                // permission the user declined.
+                val permanent = error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+
+                // "No match" and "speech timeout" are how the recognizer
+                // reports ordinary silence — they fire every time the user
+                // pauses, so counting them would switch the mic off on
+                // someone who simply stopped to think. Recycle without
+                // counting; the silence timer already handles idle input.
+                val expectedWhileIdle = error == SpeechRecognizer.ERROR_NO_MATCH ||
+                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                if (!expectedWhileIdle) consecutiveErrorsRef[0]++
+
+                if (permanent || consecutiveErrorsRef[0] >= MAX_CONSECUTIVE_SPEECH_ERRORS) {
+                    Log.w(
+                        "AgentInput",
+                        "Speech recognition stopped after error $error " +
+                            "(${consecutiveErrorsRef[0]} consecutive, permanent=$permanent)",
+                    )
+                    stopRecordingFully()
+                    return
+                }
+                startListeningInternal()
             }
 
             override fun onReadyForSpeech(params: Bundle?) {}
@@ -417,6 +449,7 @@ fun InputView(
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 isRecordingState.value = true
+                                consecutiveErrorsRef[0] = 0
                                 bargeInFiredRef[0] = false
                                 monitorModeRef[0] = isAgentSpeaking
                                 startListeningInternal()
@@ -458,6 +491,7 @@ fun InputView(
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 isRecordingState.value = true
+                                consecutiveErrorsRef[0] = 0
                                 bargeInFiredRef[0] = false
                                 monitorModeRef[0] = isAgentSpeaking
                                 startListeningInternal()
@@ -927,6 +961,14 @@ private fun ModelPill(label: String, appearance: ChatAppearance) {
 
 
 private const val silenceTimeoutSeconds: Double = 3.0
+
+/**
+ * How many real recognizer failures in a row, with no result in between,
+ * before the mic gives up instead of recycling. Silence-related errors do
+ * not count toward it, so this only trips on a recognizer that cannot
+ * succeed — which otherwise spins forever with the mic held open.
+ */
+private const val MAX_CONSECUTIVE_SPEECH_ERRORS: Int = 3
 
 /**
  * Number of *novel* words (not in the agent's recently-spoken text)
