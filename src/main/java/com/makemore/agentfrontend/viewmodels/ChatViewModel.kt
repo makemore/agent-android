@@ -408,10 +408,11 @@ class ChatViewModel(
         files: List<FileAttachment> = emptyList(),
         model: String? = null,
         thinking: Boolean? = null,
-        supersedeFromMessageIndex: Int? = null
+        supersedeFromMessageIndex: Int? = null,
+        hidden: Boolean = false
     ) {
         viewModelScope.launch {
-            sendMessageAndAwait(content, files, model, thinking, supersedeFromMessageIndex)
+            sendMessageAndAwait(content, files, model, thinking, supersedeFromMessageIndex, hidden)
         }
     }
 
@@ -422,12 +423,21 @@ class ChatViewModel(
      * need to enqueue follow-up turns sequentially without losing them
      * to the [isLoading] guard.
      */
+    /**
+     * @param hidden send the message to the agent without ever appending it
+     * to the visible transcript. For scripted triggers (onboarding / check-in
+     * / debrief session openers): hosts previously appended the trigger and
+     * deleted it a tick later, which flashed a structured blob at the user
+     * and left a ghost gap in the scroll. A message that never enters
+     * [messages] can do neither. Mirrors the iOS ChatViewModel `hidden:`.
+     */
     suspend fun sendMessageAndAwait(
         content: String,
         files: List<FileAttachment> = emptyList(),
         model: String? = null,
         thinking: Boolean? = null,
-        supersedeFromMessageIndex: Int? = null
+        supersedeFromMessageIndex: Int? = null,
+        hidden: Boolean = false
     ) {
         val trimmed = content.trim()
         if (trimmed.isEmpty() || isLoading.value) return
@@ -440,19 +450,24 @@ class ChatViewModel(
         // response and clear the chunker's buffer.
         voiceController?.reset()
 
-        // Add user message
-        messages.add(Message(
-            role = MessageRole.USER,
-            content = trimmed,
-            files = files.ifEmpty { null }
-        ))
+        // Add user message (skipped for hidden scripted triggers — the
+        // agent still receives the content below, the transcript doesn't).
+        if (!hidden) {
+            messages.add(Message(
+                role = MessageRole.USER,
+                content = trimmed,
+                files = files.ifEmpty { null }
+            ))
+        }
 
         try {
             // In ephemeral mode send the full conversation history.
             val apiMessages: List<Map<String, Any>> = if (config.ephemeral) {
                 val history = messages
                     .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
-                    .dropLast(1)  // the user message we just appended is re-added below
+                    // The visible tail duplicates `trimmed` unless hidden
+                    // (a hidden trigger was never appended).
+                    .let { if (hidden) it else it.dropLast(1) }
                     .map { mapOf("role" to it.role.value, "content" to (it.content ?: "")) }
                 history + listOf(mapOf("role" to "user", "content" to trimmed))
             } else {

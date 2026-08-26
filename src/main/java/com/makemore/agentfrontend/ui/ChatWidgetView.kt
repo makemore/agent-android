@@ -49,6 +49,18 @@ fun ChatWidgetView(
 ) {
     var showSystemPicker by remember { mutableStateOf(false) }
     var showSidebar by remember { mutableStateOf(false) }
+    // Index and working text of the user message being edited, or null. While
+    // set, the edit card replaces the composer; saving commits through
+    // `ChatViewModel.editMessage`, which truncates the transcript and
+    // restarts the conversation from that turn. Mirrors the iOS split, where
+    // the list reports the intent and the host owns the UI and the commit.
+    // Id of the message the per-row speaker button last handed to the voice
+    // controller. Only meaningful while the controller is speaking; cleared
+    // when playback ends so the row's stop button reverts to a speaker on its
+    // own. Mirrors the iOS `speakingMessageId`.
+    var speakingMessageId by remember { mutableStateOf<String?>(null) }
+    var editingMessageIndex by remember { mutableStateOf<Int?>(null) }
+    var editingText by remember { mutableStateOf("") }
     val context = LocalContext.current
     val resolvedApiClient = apiClient ?: viewModel.apiClient
 
@@ -73,6 +85,12 @@ fun ChatWidgetView(
             viewModel.voiceController = null
             controller.dispose()
         }
+    }
+
+    // Playback ending on its own has to clear the latch, or the row that was
+    // playing keeps showing a stop button with nothing to stop.
+    LaunchedEffect(controller.isSpeaking.value) {
+        if (!controller.isSpeaking.value) speakingMessageId = null
     }
 
     // Restore conversation on first composition
@@ -136,6 +154,11 @@ fun ChatWidgetView(
             // identity in the scrollback instead of floating at the
             // top of the chrome.
             Box(modifier = Modifier.weight(1f)) {
+                // Keyed on the conversation so switching chats remounts the
+                // list: its "land on the newest message" is a once-per-mount
+                // effect, and without the key a second conversation would
+                // open wherever the previous one was scrolled to.
+                key(viewModel.conversationId.value) {
                 MessageListView(
                     messages = viewModel.messages,
                     isLoading = viewModel.isLoading.value,
@@ -144,10 +167,35 @@ fun ChatWidgetView(
                     config = config,
                     onLoadMore = { viewModel.loadMoreMessages() },
                     onRetry = { index -> viewModel.retryMessage(index) },
-                    onEdit = { index, content -> viewModel.editMessage(index, content) },
-                    agentIsSpeaking = controller.isSpeaking.value,
+                    onBeginEdit = { index, content ->
+                        editingText = content
+                        editingMessageIndex = index
+                    },
+                    // Toggle: tapping the speaker on the playing message
+                    // stops it; tapping any other switches playback to that
+                    // one. An explicit play tap also re-enables the
+                    // controller, so playback recovers after a provider
+                    // failure without restarting the app.
+                    onSpeak = if (config.enableTTS) { message ->
+                        if (speakingMessageId == message.id && controller.isSpeaking.value) {
+                            controller.stop()
+                            speakingMessageId = null
+                        } else {
+                            speakingMessageId = message.id
+                            // speakOnce, not setEnabled + finishTurn: this
+                            // must not switch on the composer's read-replies
+                            // toggle as a side effect.
+                            controller.speakOnce(message.content)
+                        }
+                    } else null,
+                    speakingMessageId = speakingMessageId.takeIf { controller.isSpeaking.value },
+                    // Same reasoning as the composer: the halo marks the
+                    // LATEST assistant message, so a one-off tap on an older
+                    // message would glow the wrong row.
+                    agentIsSpeaking = controller.isSpeaking.value && !controller.isOneOffPlayback.value,
                     subAgentActivity = viewModel.subAgentActivity.value,
                 )
+                }
             }
 
             // Error display
@@ -169,10 +217,33 @@ fun ChatWidgetView(
             }
 
             // Input form
+            val editIndex = editingMessageIndex
+            if (editIndex != null) {
+                EditMessageView(
+                    text = editingText,
+                    onTextChange = { editingText = it },
+                    onSave = {
+                        val content = editingText
+                        editingMessageIndex = null
+                        editingText = ""
+                        // Truncates the transcript at that turn and restarts
+                        // the conversation from it — same contract as the iOS
+                        // `editMessage(at:newContent:)` commit.
+                        viewModel.editMessage(editIndex, content)
+                    },
+                    onCancel = {
+                        editingMessageIndex = null
+                        editingText = ""
+                    },
+                )
+            } else {
             InputView(
                 config = config,
                 isLoading = viewModel.isLoading.value,
-                isAgentSpeaking = controller.isSpeaking.value,
+                // A per-message tap must not turn the send button into
+                // "Stop speaking" or arm barge-in — the composer's speaking
+                // state is about the agent's turn, not scrollback playback.
+                isAgentSpeaking = controller.isSpeaking.value && !controller.isOneOffPlayback.value,
                 voiceController = controller,
                 onSend = { content, files ->
                     viewModel.sendMessage(content, files)
@@ -180,6 +251,7 @@ fun ChatWidgetView(
                 onCancel = { viewModel.cancelRun() },
                 viewModel = viewModel,
             )
+            }
         }
 
         // Slide-in sidebar overlay. Matches the iOS implementation: the
@@ -275,17 +347,10 @@ private fun SystemAndVoiceRow(
         }
         Spacer(modifier = Modifier.weight(1f))
 
-        // TTS toggle: speaker icon, fills/animates while playback is
-        // active. Tapping toggles `isEnabled` on the controller —
-        // disabling cuts off any in-flight audio so the user isn't
-        // trapped listening to the rest.
-        if (config.showTTSButton) {
-            VoiceToggleButton(
-                controller = voiceController,
-                primaryColor = config.primaryColor,
-            )
-            Spacer(modifier = Modifier.size(8.dp))
-        }
+        // The speak-aloud toggle lives in the composer (see
+        // InputView.SpeakRepliesButton), matching iOS — a floating copy
+        // here as well put two speaker buttons on screen doing the same
+        // thing. `showTTSButton` still gates the composer control.
 
         if (config.showSystemPicker) {
             IconButton(onClick = onShowPicker, modifier = Modifier.size(36.dp)) {

@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -66,13 +67,17 @@ fun ContextUsageBanner(
             .semantics { contentDescription = accessibilityLabel(totalTokens, contextWindow, progress) },
     ) {
         // Progress fill. `0f` is rendered as a zero-width sliver so
-        // the bar is visibly empty at conversation start.
+        // the bar is visibly empty at conversation start. The width
+        // fraction must precede `background`: after `fillMaxSize()` the
+        // incoming constraints are already fixed to the full width, so a
+        // trailing `fillMaxWidth(fraction)` is coerced back to full size
+        // and the fill tints the whole banner regardless of progress.
         if ((animatedProgress ?: 0f) > 0f) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(color.copy(alpha = 0.35f))
-                    .fillMaxWidth(fraction = animatedProgress ?: 0f),
+                    .fillMaxHeight()
+                    .fillMaxWidth(fraction = animatedProgress ?: 0f)
+                    .background(color.copy(alpha = 0.35f)),
             )
         }
         // Foreground: icon + monospace count, laid over the bar.

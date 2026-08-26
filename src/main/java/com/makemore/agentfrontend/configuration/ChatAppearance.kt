@@ -48,6 +48,12 @@ data class ChatAppearance(
      *  preserving the prior (host-customisable) behaviour; set a value
      *  to theme the user side of the transcript independently. */
     val userBubble: Color? = null,
+    /** Text colour inside the user's own message bubbles. When `null` the
+     *  transcript falls back to [textOnAccent], the prior behaviour. Set a
+     *  value when [userBubble] is not the accent colour — e.g. a neutral
+     *  grey bubble whose text needs white while [textOnAccent] stays dark
+     *  for the send button. Mirrors iOS `userBubbleText`. */
+    val userBubbleText: Color? = null,
     /** Background colour for assistant message bubbles. When `null` the
      *  transcript falls back to the adaptive system grey it used before
      *  the warm-dark redesign, so `classic()` is unchanged. The default
@@ -71,6 +77,54 @@ data class ChatAppearance(
     val greetingFontFamily: FontFamily = FontFamily.Serif,
     /** Greeting headline point size. */
     val greetingFontSize: TextUnit = 32.sp,
+    /** Type size for the user's own messages and the composer field.
+     *  Separate from [messageTextSize] because the two sides of the
+     *  transcript are set in different faces — a sans bubble and serif
+     *  prose at the same nominal size do not read as the same size — and
+     *  because tool / system rows deliberately stay at the Material body
+     *  size regardless.
+     *
+     *  [TextUnit.Unspecified] (the default) means "inherit the Material
+     *  style", so an unthemed host is byte-identical to before.
+     *
+     *  iOS models this as `userTextStyle: Font.TextStyle`. Compose has no
+     *  Dynamic Type ladder, but `sp` already tracks the system font-size
+     *  setting, so the token is a size here: iOS `.title3` is `20.sp`. */
+    val userTextSize: TextUnit = TextUnit.Unspecified,
+    /** Base type size for assistant prose. Headings are sized *relative*
+     *  to it (see [messageBlockSpacing]'s neighbours in `MessageView`),
+     *  so raising this raises the whole reply coherently instead of
+     *  flattening the hierarchy.
+     *
+     *  [TextUnit.Unspecified] means "inherit the Material style".
+     *  Mirrors iOS `messageTextStyle`; iOS `.title3` is `20.sp`. */
+    val messageTextSize: TextUnit = TextUnit.Unspecified,
+    /** Line pitch for assistant prose — baseline to baseline. Long-form
+     *  serif text needs more air than the Material default gives it.
+     *  [TextUnit.Unspecified] means "inherit the Material style".
+     *
+     *  iOS expresses this as `messageLineSpacing`: *extra* leading added
+     *  on top of the font's natural line height. Compose's `TextStyle`
+     *  has no additive equivalent, so this token is the resulting total.
+     *  iOS's 20pt serif at `lineSpacing: 6` is `30.sp` here. */
+    val messageLineHeight: TextUnit = TextUnit.Unspecified,
+    /** Typeface for assistant prose in the transcript — body copy,
+     *  headings and list items alike. [FontFamily.Serif] gives the
+     *  editorial look where the agent reads as the page rather than as a
+     *  chat partner; [FontFamily.Default] keeps the system sans. Code
+     *  blocks stay monospaced whatever this is — a serif code block is
+     *  unreadable.
+     *
+     *  Deliberately does *not* touch user bubbles or UI chrome: those
+     *  stay sans so the two voices in the transcript are typographically
+     *  distinct. Mirrors iOS `messageFontDesign`. */
+    val messageFontFamily: FontFamily = FontFamily.Default,
+    /** Vertical gap between markdown blocks in an assistant reply —
+     *  paragraph to paragraph, paragraph to heading, heading to list.
+     *  The default repeats the markdown renderer's own `block` padding so
+     *  hosts that don't set it see no change. Mirrors iOS
+     *  `messageBlockSpacing` (whose library default is 6pt). */
+    val messageBlockSpacing: Dp = 2.dp,
 
     // Layout knobs
     /** Composer layout variant. */
@@ -81,6 +135,10 @@ data class ChatAppearance(
     val composerCornerRadius: Dp = 28.dp,
     /** Corner radius applied to message bubbles. */
     val bubbleCornerRadius: Dp = 18.dp,
+    /** Whether assistant replies are drawn as bubbles or as plain text on
+     *  the background. Library default is [AssistantMessageStyle.BUBBLE].
+     *  Mirrors iOS `assistantMessageStyle`. */
+    val assistantMessageStyle: AssistantMessageStyle = AssistantMessageStyle.BUBBLE,
     /** Label rendered in the model pill on the anthropic composer.
      *  When `null` the pill is hidden. Host apps drive this from their
      *  currently selected model so the composer surfaces what's active. */
@@ -95,6 +153,19 @@ data class ChatAppearance(
      *  and circular voice button; [CLASSIC] is the original single-row
      *  pill input. Library default is [ANTHROPIC]. */
     enum class ComposerStyle { CLASSIC, ANTHROPIC }
+
+    /** How an assistant reply is drawn in the transcript.
+     *
+     *  - [BUBBLE]: the reply sits in its own filled, rounded bubble,
+     *    mirroring the user's side of the conversation.
+     *  - [PLAIN]: no fill, no bubble padding, no right-hand gutter — the
+     *    reply is just text on the chat background, so the agent reads as
+     *    the page itself rather than as another participant posting
+     *    messages. The per-message avatar is suppressed in this style
+     *    too; the presence orb above the list already carries agent
+     *    identity. Tool, system and content-block rows keep their own
+     *    treatments, which is what makes them legible as *not* prose. */
+    enum class AssistantMessageStyle { BUBBLE, PLAIN }
 
     /** How to render a sub-agent's activity while it is streaming.
      *

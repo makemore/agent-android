@@ -60,6 +60,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import androidx.compose.animation.animateContentSize
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.ui.text.style.TextOverflow
 
 /**
  * Message input view with text field and send button.
@@ -83,6 +89,25 @@ import java.io.ByteArrayOutputStream
  *   • Manual stop — the send button becomes a Stop button while the
  *     agent is speaking, so the user can always interrupt by tapping.
  */
+// `SpeechRecognizer.onRmsChanged` reports a dB figure with no fixed
+// origin: the scale varies by device and "quiet" is not zero. A handset
+// may idle near -2 while this emulator's synthetic mic idles near +10, so
+// any absolute mapping is full-scale on one and flat on the other.
+//
+// These anchors are therefore dB ABOVE whatever the device itself calls
+// quiet (the quietest sample seen since recording started). Same shape —
+// gate, normal, loud — measured from a floor the device reports rather
+// than one hardcoded here.
+/** Noise gate. Until the level rises this far above the floor the
+ *  waveform stays flat at its minimum, so room tone, fans and handling
+ *  noise draw dots and only genuinely audible sound lifts a bar. */
+private const val RMS_GATE_DB = 1f
+/** Rise that reads as ordinary speaking volume — draws normal-sized
+ *  bars, the resting size in normal use. */
+private const val RMS_NORMAL_DB = 4f
+/** Rise that reads as loud — draws full-height bars. */
+private const val RMS_LOUD_DB = 9f
+
 @Composable
 fun InputView(
     config: ChatWidgetConfig,
@@ -100,7 +125,11 @@ fun InputView(
 
     // Persisted user toggle (default on).
     val storage = remember { SharedPreferencesStorage(context, prefix = "voice") }
-    val autoSendState = remember { mutableStateOf(storage.get("autoSend") != "false") }
+    // Default OFF, matching iOS (`@AppStorage("voice.autoSend") = false`).
+    // Android defaulted it on, so a first mic tap dropped straight into
+    // hands-free — which also meant the recording waveform, which only
+    // shows for one-shot dictation, never appeared out of the box.
+    val autoSendState = remember { mutableStateOf(storage.get("autoSend") == "true") }
     val autoSendEnabled = autoSendState.value
 
     // Compose-tracked state.
@@ -110,12 +139,28 @@ fun InputView(
     // hitting send. They flow through with the next turn and reset.
     val attachedFiles = remember { mutableStateListOf<FileAttachment>() }
     val canSend = inputText.isNotBlank() || attachedFiles.isNotEmpty()
+    // `inputText`, `canSend` and `isRecording` above are composition-time
+    // snapshots: fine for laying out the composer, wrong inside the
+    // recogniser listener. That listener is registered once in a
+    // DisposableEffect(Unit), so it captures the FIRST composition's
+    // values forever — where the field was empty and canSend was false.
+    // Anything a callback or a timer evaluates must read the state
+    // objects live instead.
+    fun canSendNow(): Boolean =
+        inputTextState.value.isNotBlank() || attachedFiles.isNotEmpty()
     val isRecordingState = remember { mutableStateOf(false) }
     val isRecording = isRecordingState.value
     var hasAudioPermission by remember { mutableStateOf(false) }
     var lastSendWasMic by remember { mutableStateOf(false) }
     val countdownState = remember { mutableFloatStateOf(0f) }
     val countdownProgress = countdownState.floatValue
+    // Normalised mic level (0..1) driving the recording waveform, fed from
+    // the recogniser's onRmsChanged. Mirrors the level the iOS composer
+    // computes from its audio tap.
+    val audioLevelState = remember { mutableFloatStateOf(0f) }
+    // True between "user stopped speaking" and the final transcript
+    // arriving — drives the "Transcribing…" row, as on iOS.
+    val isTranscribingState = remember { mutableStateOf(false) }
     // Drives the AddToChatSheet presentation. Tapping `+` (anthropic)
     // or the paperclip (classic) flips this on; the sheet itself
     // dismisses by clearing the flag.
@@ -134,6 +179,13 @@ fun InputView(
     // fails instantly every time, so recycling on it spins forever with
     // the mic held open and nothing to show for it.
     val consecutiveErrorsRef = remember { intArrayOf(0) }
+    // Quietest rmsdB seen since this recording started — the device's own
+    // idea of silence, which the waveform level is measured against.
+    val rmsFloorRef = remember { floatArrayOf(Float.MAX_VALUE) }
+    // Identifies one continuous dictation session, i.e. from the mic tap
+    // until the user stops. Distinct from `sessionRef`, which changes every
+    // time the recogniser is recycled mid-session — see restartSilenceTimer.
+    val dictationRef = remember { intArrayOf(0) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -213,26 +265,47 @@ fun InputView(
 
     fun stopRecordingFully() {
         sessionRef[0]++
+        dictationRef[0]++
         cancelSilenceTimer()
         dismissTextKeyboard()
         try { speechRecognizer?.cancel() } catch (_: Throwable) {}
         isRecordingState.value = false
+        isTranscribingState.value = false
+        audioLevelState.floatValue = 0f
         monitorModeRef[0] = false
         bargeInFiredRef[0] = false
     }
 
+    /**
+     * Ends dictation but keeps whatever was transcribed, so the user can
+     * edit before sending — the iOS "Stop dictation" contract. The
+     * recogniser is asked to finalise (`stopListening`) rather than
+     * cancelled, and the session token is deliberately left alone, so the
+     * last utterance still arrives through `onResults`.
+     */
+    fun stopDictationKeepingText() {
+        dictationRef[0]++
+        cancelSilenceTimer()
+        try { speechRecognizer?.stopListening() } catch (_: Throwable) {}
+        isRecordingState.value = false
+        // The final transcript is still in flight; onResults/onError clear this.
+        isTranscribingState.value = true
+        audioLevelState.floatValue = 0f
+        monitorModeRef[0] = false
+    }
+
     fun doSend() {
-        if (!canSend) return
+        if (!canSendNow()) return
         dismissTextKeyboard()
         // Latch the input source so the hands-free loop knows this turn
         // originated from the mic.
-        lastSendWasMic = isRecording
+        lastSendWasMic = isRecordingState.value
         cancelSilenceTimer()
-        val textToSend = inputText
+        val textToSend = inputTextState.value
         val filesToSend = attachedFiles.toList()
         inputTextState.value = ""
         attachedFiles.clear()
-        if (isRecording) {
+        if (isRecordingState.value) {
             // Continuous voice mode: keep the recognizer alive, just
             // recycle so the next utterance starts fresh.
             sessionRef[0]++
@@ -257,17 +330,26 @@ fun InputView(
     fun restartSilenceTimer() {
         silenceTimerRef[0]?.cancel()
         countdownState.floatValue = 1f
-        val token = sessionRef[0]
+        // Keyed on the dictation session, NOT on `sessionRef`. Hands-free
+        // recycles the recogniser after every utterance, and
+        // startListeningInternal bumps `sessionRef` as it does so — which
+        // `onResults` calls on the line after arming this timer. Keyed on
+        // `sessionRef` the very first tick therefore saw a changed token
+        // and bailed, so the ring never counted down and auto-send never
+        // fired. The dictation token only changes when the user actually
+        // starts or stops dictating, which is what should cancel a
+        // pending send.
+        val token = dictationRef[0]
         silenceTimerRef[0] = coroutineScope.launch {
             val tickMs = 100L
             val totalTicks = (silenceTimeoutSeconds * 1000 / tickMs).toInt()
             for (tick in 0 until totalTicks) {
                 delay(tickMs)
-                if (sessionRef[0] != token) return@launch
+                if (dictationRef[0] != token || !isRecordingState.value) return@launch
                 countdownState.floatValue = 1f - (tick + 1).toFloat() / totalTicks
             }
-            if (sessionRef[0] != token) return@launch
-            if (canSend) doSend() else stopRecordingFully()
+            if (dictationRef[0] != token || !isRecordingState.value) return@launch
+            if (canSendNow()) doSend() else stopRecordingFully()
         }
     }
 
@@ -275,6 +357,7 @@ fun InputView(
         val recognizer = speechRecognizer ?: return@DisposableEffect onDispose { cancelSilenceTimer() }
         val listener = object : RecognitionListener {
             override fun onResults(results: Bundle?) {
+                isTranscribingState.value = false
                 if (activeSessionRef[0] != sessionRef[0]) return
                 consecutiveErrorsRef[0] = 0
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
@@ -309,6 +392,12 @@ fun InputView(
             }
 
             override fun onError(error: Int) {
+                // Cleared before the guards below: after a "stop, keep the
+                // text" the recogniser is no longer recording but a final
+                // transcript is still pending, and an error instead of a
+                // result would otherwise leave "Transcribing..." on screen
+                // with no way back.
+                isTranscribingState.value = false
                 if (activeSessionRef[0] != sessionRef[0]) return
                 if (!isRecordingState.value) return
 
@@ -342,9 +431,38 @@ fun InputView(
 
             override fun onReadyForSpeech(params: Bundle?) {}
             override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onRmsChanged(rmsdB: Float) {
+                // SpeechRecognizer reports roughly -2..10 dB, with room
+                // ambience sitting around the low end. Map from a floor
+                // just above ambience so a quiet room renders as the flat
+                // row of dots iOS shows at rest, and only speech lifts the
+                // bars — normalising from -2 made ambient noise draw a
+                // permanently half-height waveform.
+                // Three anchors rather than one straight line. Below the
+                // gate the waveform stays flat at its minimum, so ambient
+                // room noise draws dots and only audible sound moves it;
+                // ordinary speaking volume draws NORMAL_BAR_HEIGHT bars,
+                // the resting size in normal use; louder audio grows from
+                // there to full height. A single linear map from the bottom
+                // of the dB range put everyday room noise at full scale.
+                // Quietest sample seen this session is what this device
+                // calls silence; the level is the rise above it.
+                if (rmsdB < rmsFloorRef[0]) rmsFloorRef[0] = rmsdB
+                val rise = rmsdB - rmsFloorRef[0]
+                audioLevelState.floatValue = when {
+                    rise <= RMS_GATE_DB -> 0f
+                    rise <= RMS_NORMAL_DB ->
+                        NORMAL_LEVEL * (rise - RMS_GATE_DB) / (RMS_NORMAL_DB - RMS_GATE_DB)
+                    else -> (NORMAL_LEVEL + (1f - NORMAL_LEVEL) *
+                        (rise - RMS_NORMAL_DB) / (RMS_LOUD_DB - RMS_NORMAL_DB)).coerceAtMost(1f)
+                }
+            }
             override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
+            override fun onEndOfSpeech() {
+                // Speech ended; the final transcript is still coming.
+                isTranscribingState.value = true
+            }
+
             override fun onEvent(eventType: Int, params: Bundle?) {}
         }
         recognizer.setRecognitionListener(listener)
@@ -427,8 +545,26 @@ fun InputView(
                     onSend = { doSend() },
                     voiceEnabled = speechInputAvailable,
                     isRecording = isRecording,
+                    isTranscribing = isTranscribingState.value,
+                    audioLevel = audioLevelState.floatValue,
                     autoSendEnabled = autoSendEnabled,
                     countdownProgress = countdownProgress,
+                    speakRepliesEnabled = voiceController?.autoSpeakReplies?.value == true,
+                    speakAloudAvailable = config.enableTTS && config.showTTSButton && voiceController != null,
+                    onToggleSpeakReplies = {
+                        // The button is the stop: switching it off cuts any
+                        // audio mid-sentence rather than letting the current
+                        // reply finish. Mirrors iOS toggleSpeakReplies.
+                        // Drives the auto-play PREFERENCE, not the
+                        // controller's capability — flipping capability here
+                        // is what coupled this button to the per-message
+                        // speaker buttons.
+                        val next = voiceController?.autoSpeakReplies?.value != true
+                        voiceController?.autoSpeakReplies?.value = next
+                        if (!next) voiceController?.stop()
+                    },
+                    onCancelDictation = { stopRecordingFully() },
+                    onStopDictation = { stopDictationKeepingText() },
                     onToggleAutoSend = {
                         val next = !autoSendState.value
                         autoSendState.value = next
@@ -449,6 +585,8 @@ fun InputView(
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 isRecordingState.value = true
+                                dictationRef[0]++
+                                rmsFloorRef[0] = Float.MAX_VALUE
                                 consecutiveErrorsRef[0] = 0
                                 bargeInFiredRef[0] = false
                                 monitorModeRef[0] = isAgentSpeaking
@@ -491,6 +629,8 @@ fun InputView(
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
                                 isRecordingState.value = true
+                                dictationRef[0]++
+                                rmsFloorRef[0] = Float.MAX_VALUE
                                 consecutiveErrorsRef[0] = 0
                                 bargeInFiredRef[0] = false
                                 monitorModeRef[0] = isAgentSpeaking
@@ -697,7 +837,7 @@ private fun ClassicComposer(
             shape = RoundedCornerShape(24.dp),
             maxLines = 5,
             singleLine = false,
-            textStyle = MaterialTheme.typography.bodyMedium,
+            textStyle = config.appearance.userStyle(MaterialTheme.typography.bodyMedium),
             colors = OutlinedTextFieldDefaults.colors(
                 unfocusedBorderColor = Color.Transparent,
                 focusedBorderColor = Color.Transparent,
@@ -727,12 +867,68 @@ private fun AnthropicComposer(
     onSend: () -> Unit,
     voiceEnabled: Boolean,
     isRecording: Boolean,
+    isTranscribing: Boolean,
+    audioLevel: Float,
     autoSendEnabled: Boolean,
     countdownProgress: Float,
+    speakRepliesEnabled: Boolean,
+    speakAloudAvailable: Boolean,
+    onToggleSpeakReplies: () -> Unit,
     onToggleAutoSend: () -> Unit,
     onToggleRecording: () -> Unit,
+    onCancelDictation: () -> Unit,
+    onStopDictation: () -> Unit,
     rightActionButton: @Composable () -> Unit,
 ) {
+    // ── Single-row / two-row restructure ────────────────────────────
+    // The composer starts as one row (controls beside the field) and
+    // restructures to two (field above its own control row) only once
+    // the text genuinely needs a second line. Mirrors the iOS composer.
+    //
+    // One ruler for both directions: the text needs two rows iff it
+    // contains a newline or won't fit the single-row field width.
+    // Expansion and reversion measure the same way, against the width
+    // captured while still single-row — the two-row field is wider, so
+    // judging reversion against the current width would bounce the
+    // layout at the boundary on every keystroke.
+    val textMeasurer = rememberTextMeasurer()
+    // One style for the field, its placeholder and the wrap measurement
+    // below. It has to be the size the field is *actually* set in: it was
+    // pinned to `bodyLarge` while the field was too, and now that the host
+    // can raise it via `userTextSize`, a stale size here would
+    // under-measure every string and the field would visually wrap a word
+    // or two before the math admitted it had.
+    val textStyle = config.appearance
+        .userStyle(MaterialTheme.typography.bodyLarge)
+        .copy(color = config.appearance.textPrimary)
+    var isMultiline by remember { mutableStateOf(false) }
+    // Field width captured while still single-row; reversion is judged
+    // against this, never against the wider two-row field.
+    var narrowFieldWidth by remember { mutableIntStateOf(0) }
+
+    // One-shot dictation presents as a single row: the field is hidden
+    // behind the waveform, so there is no wrapped text to make room for.
+    val showsWaveform = isRecording && !autoSendEnabled
+    val twoRow = isMultiline && !showsWaveform
+
+    if (!showsWaveform && narrowFieldWidth > 0) {
+        // Trailing spaces never wrap the field, so they must not count
+        // toward the wrap decision either.
+        val wrapText = inputText.trimEnd(' ')
+        val textWidth = if (wrapText.isEmpty()) 0
+            else textMeasurer.measure(wrapText, textStyle, maxLines = 1).size.width
+        val needsTwoRows = when {
+            inputText.isEmpty() -> false
+            inputText.contains('\n') -> true
+            // Hysteresis: expand once the text exceeds the single-row
+            // width, collapse only once it is comfortably back under.
+            // The band between keeps borderline text stable.
+            isMultiline -> textWidth >= narrowFieldWidth - 12
+            else -> textWidth > narrowFieldWidth
+        }
+        if (needsTwoRows != isMultiline) isMultiline = needsTwoRows
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -743,40 +939,91 @@ private fun AnthropicComposer(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(config.appearance.composerCornerRadius))
-                .background(config.appearance.surface),
+                .background(config.appearance.surface)
+                .animateContentSize(),
         ) {
-            BasicTextField(
-                value = inputText,
-                onValueChange = onInputChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 14.dp),
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = config.appearance.textPrimary,
-                ),
-                cursorBrush = SolidColor(config.appearance.accent),
-                maxLines = 6,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onSend() }),
-                decorationBox = { inner ->
-                    if (inputText.isEmpty()) {
-                        Text(
-                            config.placeholder,
-                            color = config.appearance.textSecondary,
-                            style = MaterialTheme.typography.bodyLarge,
+            // The field slot: its own row when two-row, otherwise inline
+            // with the leading controls and the trailing mic/send.
+            @Composable
+            fun fieldSlot(modifier: Modifier) {
+                Box(modifier) {
+                    when {
+                        showsWaveform -> RecordingWaveformView(
+                            level = audioLevel,
+                            color = config.appearance.accent,
+                        )
+                        isTranscribing -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(
+                                Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = config.appearance.textSecondary,
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Transcribing…",
+                                color = config.appearance.textSecondary,
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                        else -> BasicTextField(
+                            value = inputText,
+                            onValueChange = onInputChange,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onSizeChanged { size ->
+                                    // Only record the width while single-row —
+                                    // the two-row field is full-card width,
+                                    // which is not the width that decides
+                                    // anything.
+                                    if (!isMultiline && size.width > 0) {
+                                        narrowFieldWidth = size.width
+                                    }
+                                },
+                            textStyle = textStyle,
+                            cursorBrush = SolidColor(config.appearance.accent),
+                            maxLines = 6,
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                            keyboardActions = KeyboardActions(onSend = { onSend() }),
+                            decorationBox = { inner ->
+                                if (inputText.isEmpty()) {
+                                    // One line, ellipsised: the single-row
+                                    // field is narrow, and a wrapping
+                                    // placeholder made the empty composer
+                                    // twice as tall as it needed to be.
+                                    Text(
+                                        config.placeholder,
+                                        color = config.appearance.textSecondary,
+                                        style = textStyle,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                inner()
+                            },
                         )
                     }
-                    inner()
-                },
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (config.enableFiles) {
+                }
+            }
+
+            @Composable
+            fun leadingControls() {
+                if (showsWaveform) {
+                    CircularIconButton(
+                        icon = Icons.Outlined.Close,
+                        contentDescription = "Cancel dictation",
+                        tint = config.appearance.textSecondary,
+                        onClick = onCancelDictation,
+                    )
+                }
+                if (!showsWaveform && speakAloudAvailable) {
+                    SpeakRepliesButton(
+                        enabled = speakRepliesEnabled,
+                        accent = config.appearance.accent,
+                        tint = config.appearance.textSecondary,
+                        onClick = onToggleSpeakReplies,
+                    )
+                }
+                if (!showsWaveform && config.enableFiles) {
                     CircularIconButton(
                         icon = Icons.Outlined.Add,
                         contentDescription = "Add to chat",
@@ -787,16 +1034,27 @@ private fun AnthropicComposer(
                 // Gated on `showModelSelector` (off by default) — the pill
                 // is the only entry point to the model selector, so hiding
                 // it fully suppresses the selector for hosts that don't opt in.
-                if (config.showModelSelector) {
+                if (!showsWaveform && config.showModelSelector) {
                     config.appearance.modelPillLabel?.takeIf { it.isNotEmpty() }?.let { label ->
-                        ModelPill(
-                            label = label,
-                            appearance = config.appearance,
-                        )
+                        ModelPill(label = label, appearance = config.appearance)
                     }
                 }
-                Spacer(modifier = Modifier.weight(1f))
-                if (voiceEnabled) {
+            }
+
+            @Composable
+            fun trailingControls() {
+                if (showsWaveform) {
+                    // While the waveform is up, stop replaces the
+                    // hands-free toggle and the mic — as on iOS, the only
+                    // two controls during dictation are stop (keep the
+                    // transcript) and send. Cancel/discard is the X in the
+                    // leading slot.
+                    DictationStopButton(
+                        tint = config.appearance.textSecondary,
+                        fill = config.appearance.surfaceElevated,
+                        onClick = onStopDictation,
+                    )
+                } else if (voiceEnabled) {
                     AutoSendToggle(
                         autoSendEnabled = autoSendEnabled,
                         accent = config.appearance.accent,
@@ -811,7 +1069,90 @@ private fun AnthropicComposer(
                 }
                 rightActionButton()
             }
+
+            if (twoRow) {
+                fieldSlot(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    leadingControls()
+                    Spacer(modifier = Modifier.weight(1f))
+                    trailingControls()
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    leadingControls()
+                    fieldSlot(Modifier.weight(1f).padding(horizontal = 4.dp))
+                    trailingControls()
+                }
+            }
         }
+    }
+}
+
+/**
+ * Stop dictation — ends recording and keeps the transcribed text for
+ * editing. Neutral circular button on the elevated surface, matching the
+ * iOS dictation controls; the destructive-looking red [StopButton] is for
+ * cancelling a run, which is a different action.
+ */
+@Composable
+private fun DictationStopButton(
+    tint: Color,
+    fill: Color,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(36.dp).clip(CircleShape).background(fill),
+    ) {
+        Icon(
+            Icons.Default.Stop,
+            contentDescription = "Stop dictation",
+            tint = tint,
+            modifier = Modifier.size(18.dp),
+        )
+    }
+}
+
+/**
+ * Decides whether S'Ai talks out loud.
+ *
+ * Two states, not three: switching it off *is* the stop. Tapping the
+ * speaker while a reply is being read cuts the audio immediately and
+ * leaves it off, which is what "turn the sound off" means everywhere
+ * else. Stopping never touches the run — the reply keeps arriving as
+ * text, you just stop hearing it. Mirrors the iOS speakRepliesButton.
+ */
+@Composable
+private fun SpeakRepliesButton(
+    enabled: Boolean,
+    accent: Color,
+    tint: Color,
+    onClick: () -> Unit,
+) {
+    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+        Icon(
+            imageVector = if (enabled) Icons.AutoMirrored.Filled.VolumeUp
+                          else Icons.AutoMirrored.Filled.VolumeOff,
+            contentDescription = if (enabled) "Stop reading replies aloud" else "Read replies aloud",
+            tint = if (enabled) accent else tint,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 
