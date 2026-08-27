@@ -131,6 +131,10 @@ data class ChatAppearance(
     val composerStyle: ComposerStyle = ComposerStyle.ANTHROPIC,
     /** Brand mark shown above the greeting text. */
     val brandMark: BrandMark = BrandMark.None,
+    /** Size of that mark. Defaults to the Material icon size so existing
+     *  hosts are unchanged; surfaces whose empty state leads with the glyph
+     *  rather than the greeting will want it considerably larger. */
+    val brandMarkSize: Dp = 24.dp,
     /** Corner radius applied to the composer card. */
     val composerCornerRadius: Dp = 28.dp,
     /** Corner radius applied to message bubbles. */

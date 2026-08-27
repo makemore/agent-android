@@ -31,6 +31,11 @@ data class ChatGreetingConfig(
     val afternoonTemplate: String = "Good afternoon",
     val eveningTemplate: String = "Good evening",
     val nightTemplate: String = "Good evening",
+    /** Optional line under the greeting — what this surface is for, in the
+     *  secondary text colour. Null renders nothing, so the S'Ai greeting is
+     *  unchanged. Added for JSP-Assist, whose empty state introduces the
+     *  service rather than greeting the user. */
+    val subtitle: String? = null,
 ) {
     /** Returns the greeting line for an hour-of-day in 0..<24,
      *  appending ", \(userName)" when set. The split is the standard

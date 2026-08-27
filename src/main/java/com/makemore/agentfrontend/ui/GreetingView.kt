@@ -2,10 +2,13 @@ package com.makemore.agentfrontend.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.FindInPage
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.Icon
@@ -69,6 +72,15 @@ fun GreetingView(
             color = config.appearance.textPrimary,
             textAlign = TextAlign.Center,
         )
+        config.greeting.subtitle?.takeIf { it.isNotBlank() }?.let { subtitle ->
+            Text(
+                text = subtitle,
+                fontSize = 15.sp,
+                lineHeight = 22.sp,
+                color = config.appearance.textSecondary,
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
@@ -84,12 +96,15 @@ private fun BrandMarkView(appearance: ChatAppearance) {
         "ChatBubbleOutline", "bubble.left" -> Icons.Outlined.ChatBubbleOutline
         "AutoAwesome", "sparkles" -> Icons.Outlined.AutoAwesome
         "Chat" -> Icons.AutoMirrored.Outlined.Chat
+        "FindInPage", "doc.text.magnifyingglass" -> Icons.Outlined.FindInPage
         else -> Icons.Outlined.ChatBubbleOutline
     }
     Icon(
         imageVector = icon,
         contentDescription = null,
         tint = appearance.accent,
-        modifier = Modifier.padding(bottom = 4.dp),
+        modifier = Modifier
+            .padding(bottom = 4.dp)
+            .size(appearance.brandMarkSize),
     )
 }
