@@ -447,6 +447,7 @@ import androidx.compose.runtime.setValue
 import com.example.myapp.config.AppEnvironment
 import com.makemore.agentfrontend.AgentFrontend
 import com.makemore.agentfrontend.configuration.AuthStrategy
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatSidebarConfig
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
@@ -461,6 +462,7 @@ class AppViewModel(context: Context, token: String?) {
         backendUrl = AppEnvironment.apiBaseUrl,
         agentKey = AppEnvironment.agentKey,
         title = "My Assistant",
+        appearance = ChatAppearance.recommended(),  // presets: classic, anthropic, neutral, resilientGold
         showInternalTopBar = false,                 // host provides the top bar
         sidebar = ChatSidebarConfig(enabled = false), // host provides the sidebar
         showTasksTab = false,
@@ -887,6 +889,7 @@ After creating all the files above, verify:
 | What | Where | How |
 |------|-------|-----|
 | App name / title | `AppViewModel.kt` | Change `title = "My Assistant"` in `config` |
+| Appearance preset | `AppViewModel.kt` | Set `appearance = ChatAppearance.recommended()` in `config`; presets: `classic()`, `anthropic()`, `neutral()`, `resilientGold()` |
 | Primary colour | `AppViewModel.kt` | Add `primaryColor = Color(0xFF0066CC)` to `config` |
 | Agent key | Build type | Change the `AGENT_KEY` `buildConfigField` |
 | Auth endpoint | `AuthRepository.kt` | Change `/api/accounts/token/` path |
