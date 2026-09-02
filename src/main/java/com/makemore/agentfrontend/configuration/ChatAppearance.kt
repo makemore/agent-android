@@ -230,5 +230,112 @@ data class ChatAppearance(
          *  calling `ChatAppearance()` with no arguments; exposed as a
          *  factory for clarity when assigning at the call site. */
         fun anthropic(): ChatAppearance = ChatAppearance()
+
+        /** Generic, unbranded starting point for new host apps — the
+         *  recommended base to `.copy()` from. Keeps the polished
+         *  anthropic *layout* (rounded-card composer, current corner
+         *  radii) but resolves colours from the host's Material theme
+         *  the same way `classic()` does ([Color.Unspecified] means
+         *  "resolve from the theme"), with a neutral slate accent
+         *  instead of a brand colour and the default sans faces. No
+         *  brand mark. Mirrors iOS `.neutral` as closely as the
+         *  platform allows.
+         *
+         *  Every constructor parameter is passed explicitly so future
+         *  changes to the defaults can never shift this preset. */
+        fun neutral(): ChatAppearance = ChatAppearance(
+            background = Color.Unspecified,
+            surface = Color.Unspecified,
+            surfaceElevated = Color.Unspecified,
+            divider = Color.Gray.copy(alpha = 0.2f),
+            textPrimary = Color.Unspecified,
+            textSecondary = Color.Unspecified,
+            textOnAccent = Color.White,
+            accent = Color(0xFF4A6B8E),
+            userBubble = null,
+            userBubbleText = null,
+            assistantBubble = null,
+            systemBubble = null,
+            link = null,
+            greetingFontFamily = FontFamily.Default,
+            greetingFontSize = 32.sp,
+            userTextSize = TextUnit.Unspecified,
+            messageTextSize = TextUnit.Unspecified,
+            messageLineHeight = TextUnit.Unspecified,
+            messageFontFamily = FontFamily.Default,
+            messageBlockSpacing = 2.dp,
+            composerStyle = ComposerStyle.ANTHROPIC,
+            brandMark = BrandMark.None,
+            brandMarkSize = 24.dp,
+            composerCornerRadius = 28.dp,
+            bubbleCornerRadius = 18.dp,
+            assistantMessageStyle = AssistantMessageStyle.BUBBLE,
+            modelPillLabel = null,
+            subAgentActivityStyle = SubAgentActivityStyle.PILL,
+        )
+
+        /** Entry point for new integrations. Currently [neutral]. May be
+         *  re-pointed to a newer preset in future releases — hosts that
+         *  need a stable look should pin a named preset instead. */
+        fun recommended(): ChatAppearance = neutral()
+
+        /** Resilient Minds house style — a pinned snapshot derived from
+         *  the warm-dark anthropic look. Intentional departures:
+         *
+         *  - Accent is the RM brand gold (`#D8A762`) instead of Claude
+         *    coral, and `textOnAccent` is black rather than white: gold
+         *    is a light accent, white on it measures ~2.2:1 (fails WCAG),
+         *    so on-gold chrome takes black instead.
+         *  - The transcript is asymmetric on purpose: user turns are
+         *    grey bubbles with white text ([userBubbleText] carries
+         *    white independently of [textOnAccent]), and assistant
+         *    replies are [AssistantMessageStyle.PLAIN] serif prose on
+         *    the background — the agent reads as the page, not as a
+         *    second participant.
+         *  - One black in the app: the background is a true near-black
+         *    ground (`#0C0C0A`, warm-biased like `#262624` but far
+         *    darker) and raised surfaces are translucent white ON it,
+         *    so elevation reads as light rather than a different grey.
+         *  - Type sizes are iOS's `.body` in `sp`; `messageLineHeight`
+         *    is iOS's 17pt body plus its 6pt `lineSpacing` resolved to
+         *    a total pitch because Compose has no additive leading.
+         *
+         *  Mirrors iOS `ChatAppearance.resilientGold` except where RM's
+         *  Android app already deliberately diverged — notably the
+         *  true-black background and translucent-white surfaces (iOS
+         *  stays on the warm near-black `#262624` trio).
+         *
+         *  Every token is intentionally explicit so library default
+         *  changes cannot alter this preset. */
+        fun resilientGold(): ChatAppearance = ChatAppearance(
+            background = Color(0xFF0C0C0A),
+            surface = Color.White.copy(alpha = 0.08f),
+            surfaceElevated = Color.White.copy(alpha = 0.12f),
+            divider = Color.White.copy(alpha = 0.08f),
+            textPrimary = Color(0xFFF5F5F7),
+            textSecondary = Color(0xFFA1A1A6),
+            textOnAccent = Color.Black,
+            accent = Color(0xFFD8A762),
+            userBubble = Color.White.copy(alpha = 0.12f),
+            userBubbleText = Color.White,
+            assistantBubble = Color(0xFF3A3A37),
+            systemBubble = Color(0xFF2F2F2D),
+            link = null,
+            greetingFontFamily = FontFamily.Serif,
+            greetingFontSize = 32.sp,
+            userTextSize = 17.sp,
+            messageTextSize = 17.sp,
+            messageLineHeight = 26.sp,
+            messageFontFamily = FontFamily.Serif,
+            messageBlockSpacing = 10.dp,
+            composerStyle = ComposerStyle.ANTHROPIC,
+            brandMark = BrandMark.None,
+            brandMarkSize = 24.dp,
+            composerCornerRadius = 28.dp,
+            bubbleCornerRadius = 18.dp,
+            assistantMessageStyle = AssistantMessageStyle.PLAIN,
+            modelPillLabel = null,
+            subAgentActivityStyle = SubAgentActivityStyle.PILL,
+        )
     }
 }
