@@ -42,6 +42,7 @@ import com.mikepenz.markdown.compose.elements.MarkdownHeader
 import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeBlock
 import com.mikepenz.markdown.compose.elements.MarkdownHighlightedCodeFence
 import com.mikepenz.markdown.model.markdownPadding
+import com.mikepenz.markdown.model.rememberMarkdownState
 import dev.snipme.highlights.Highlights
 import dev.snipme.highlights.model.SyntaxThemes
 import java.text.SimpleDateFormat
@@ -254,8 +255,21 @@ fun MessageView(
                                 stripThematicBreaks(raw)
                             }
 
-                            Markdown(
+                            // Parsed synchronously. The library's default
+                            // path builds a fresh state per content change
+                            // and parses it off-thread, rendering an empty
+                            // `loading` box in between — so during a stream
+                            // the bubble collapsed to nothing and popped back
+                            // on every delta. Immediate mode keeps the old
+                            // tree on screen until the new one is ready; the
+                            // parse is a scan of a few KB, well within a frame.
+                            val markdownState = rememberMarkdownState(
                                 content = markdownSource,
+                                immediate = true,
+                            )
+
+                            Markdown(
+                                markdownState = markdownState,
                                 colors = markdownColor(
                                     text = textColor,
                                     linkText = linkColor,

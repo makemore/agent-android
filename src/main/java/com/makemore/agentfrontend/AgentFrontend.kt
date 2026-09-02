@@ -1,8 +1,13 @@
 package com.makemore.agentfrontend
 
 import android.content.Context
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.takeOrElse
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.networking.APIClient
 import com.makemore.agentfrontend.services.InMemoryStorage
@@ -52,17 +57,22 @@ object AgentFrontend {
         config: ChatWidgetConfig,
         modifier: Modifier = Modifier
     ) {
+        val resolvedConfig = config.withResolvedAppearance()
         // Secrets (auth token, client memories) are encrypted via the Android
         // Keystore; non-secret UI prefs stay in plain SharedPreferences.
-        val storage = SecureStorageService.makeDefault(
-            context,
-            prefix = config.agentKey,
-            secureKeys = setOf(config.anonymousTokenKey),
-        )
-        val apiClient = APIClient(config, storage)
-        val viewModel = ChatViewModel(config, apiClient, storage, context = context)
+        val storage = remember(context, resolvedConfig.agentKey, resolvedConfig.anonymousTokenKey) {
+            SecureStorageService.makeDefault(
+                context,
+                prefix = resolvedConfig.agentKey,
+                secureKeys = setOf(resolvedConfig.anonymousTokenKey),
+            )
+        }
+        val apiClient = remember(resolvedConfig, storage) { APIClient(resolvedConfig, storage) }
+        val viewModel = remember(resolvedConfig, apiClient, storage, context) {
+            ChatViewModel(resolvedConfig, apiClient, storage, context = context)
+        }
 
-        ChatWidgetView(viewModel = viewModel, config = config, modifier = modifier)
+        ChatWidgetView(viewModel = viewModel, config = resolvedConfig, modifier = modifier)
     }
 
     /**
@@ -80,10 +90,13 @@ object AgentFrontend {
         storage: StorageService,
         modifier: Modifier = Modifier
     ) {
-        val apiClient = APIClient(config, storage)
-        val viewModel = ChatViewModel(config, apiClient, storage, context = context)
+        val resolvedConfig = config.withResolvedAppearance()
+        val apiClient = remember(resolvedConfig, storage) { APIClient(resolvedConfig, storage) }
+        val viewModel = remember(resolvedConfig, apiClient, storage, context) {
+            ChatViewModel(resolvedConfig, apiClient, storage, context = context)
+        }
 
-        ChatWidgetView(viewModel = viewModel, config = config, modifier = modifier)
+        ChatWidgetView(viewModel = viewModel, config = resolvedConfig, modifier = modifier)
     }
 
     /**
@@ -118,4 +131,20 @@ object AgentFrontend {
         return ChatViewModel(config, apiClient, storage, context = context)
     }
 }
+
+@Composable
+private fun ChatWidgetConfig.withResolvedAppearance(): ChatWidgetConfig {
+    val colorScheme = MaterialTheme.colorScheme
+    return remember(this, colorScheme) {
+        copy(appearance = appearance.resolveAgainst(colorScheme))
+    }
+}
+
+internal fun ChatAppearance.resolveAgainst(colorScheme: ColorScheme): ChatAppearance = copy(
+    background = background.takeOrElse { colorScheme.background },
+    surface = surface.takeOrElse { colorScheme.surface },
+    surfaceElevated = surfaceElevated.takeOrElse { colorScheme.surfaceContainerHigh },
+    textPrimary = textPrimary.takeOrElse { colorScheme.onSurface },
+    textSecondary = textSecondary.takeOrElse { colorScheme.onSurfaceVariant },
+)
 
