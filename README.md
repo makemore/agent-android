@@ -143,6 +143,29 @@ val config = ChatWidgetConfig(
 )
 ```
 
+### Appearance presets
+
+`ChatWidgetConfig.appearance` takes a `ChatAppearance`. New integrations should
+start from the recommended preset and `.copy()` individual tokens as needed:
+
+```kotlin
+import com.makemore.agentfrontend.configuration.ChatAppearance
+
+val config = ChatWidgetConfig(
+    appearance = ChatAppearance.recommended(),
+)
+```
+
+Available presets:
+
+| Preset | Look |
+|--------|------|
+| `ChatAppearance.recommended()` | Entry point for new integrations — currently `neutral()`. May be re-pointed in future releases; pin a named preset for a stable look. |
+| `ChatAppearance.neutral()` | Generic, system-adaptive starting point — anthropic layout, theme-resolved colours, neutral accent. |
+| `ChatAppearance.anthropic()` | Warm-dark library default (equivalent to `ChatAppearance()`). |
+| `ChatAppearance.classic()` | The original pre-0.8 look. |
+| `ChatAppearance.resilientGold()` | Resilient Minds house style — pinned gold-on-black snapshot. |
+
 ### Privacy-safe voice output
 
 Normal mode keeps the existing remote/provider-backed voice behavior when the
