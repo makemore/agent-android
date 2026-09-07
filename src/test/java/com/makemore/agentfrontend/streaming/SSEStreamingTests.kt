@@ -25,7 +25,7 @@ import org.junit.Test
  * Level-A streaming tests. Wires the *real* [ChatViewModel], [APIClient]
  * and [com.makemore.agentfrontend.networking.SSEClient] together but
  * routes every HTTP request through [MockWebServer] so each scenario
- * replays a JSON fixture from `clients/test-fixtures/sse/`. No real
+ * replays a JSON fixture from `test-harness/fixtures/sse/`. No real
  * `agent_studio` instance — but the same code paths the production app
  * exercises. Mirrors the iOS `SSEStreamingTests`.
  */
