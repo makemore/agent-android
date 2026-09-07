@@ -28,7 +28,14 @@ enum class DisconnectReason {
  * Server-Sent Events client for streaming responses.
  * Uses OkHttp for HTTP streaming — mirrors the iOS SSEClient.
  */
-class SSEClient {
+class SSEClient(
+    private val client: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(java.time.Duration.ofSeconds(30))
+        .readTimeout(java.time.Duration.ofSeconds(960))
+        .callTimeout(java.time.Duration.ofSeconds(1020))
+        .build(),
+    private val callbackDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+) {
     var onEvent: ((SSEEvent) -> Unit)? = null
     var onError: ((Throwable) -> Unit)? = null
     var onComplete: (() -> Unit)? = null
@@ -38,30 +45,20 @@ class SSEClient {
     /// networking in response — it just signals.
     var onDisconnect: ((String, DisconnectReason) -> Unit)? = null
 
-    private var call: Call? = null
-    private var scope: CoroutineScope? = null
-    /// Run ID of the active stream, set inside `connect(url, headers, runId)`.
-    /// Captured here so `disconnect(reason:)` can pass it to the
-    /// `onDisconnect` callback without callers having to remember to
-    /// supply it. Cleared on disconnect.
-    private var lastRunId: String? = null
-    /// Set true after the onDisconnect callback has fired for the
-    /// current run. Prevents double-firing if both an explicit
-    /// disconnect and a late error callback race on the same run.
-    private var hasFiredDisconnect: Boolean = false
-
-    /// Set by `disconnect()` so the stream coroutine and OkHttp callback can
-    /// distinguish a deliberate teardown after a terminal SSE event (surface
-    /// as `onComplete`) from a genuine network failure (surface as `onError`).
-    /// Without this, calling `disconnect()` after `run.succeeded` cancels the
-    /// scope before the `finally` block can fire `onComplete`, leaving any
-    /// `CompletableDeferred`-based awaiter (see ChatViewModel.subscribeToEvents)
-    /// suspended forever. Mirrors the iOS `expectingDisconnect` flag.
-    private var expectingDisconnect = false
-
-    private val client = OkHttpClient.Builder()
-        .readTimeout(java.time.Duration.ofMinutes(5))
-        .build()
+    // Connection ownership and every callback are confined to one dispatcher.
+    // A late callback can never observe callbacks installed for its replacement.
+    private val callbacks = CoroutineScope(SupervisorJob() + callbackDispatcher)
+    private class Connection(
+        val call: Call,
+        val runId: String?,
+        val event: ((SSEEvent) -> Unit)?,
+        val error: ((Throwable) -> Unit)?,
+        val complete: (() -> Unit)?,
+        val disconnected: ((String, DisconnectReason) -> Unit)?,
+        var job: Job? = null,
+        var response: Response? = null,
+    )
+    private var connection: Connection? = null
 
     /**
      * Connect to an SSE endpoint.
@@ -75,74 +72,58 @@ class SSEClient {
      *   because there is no runId to report.
      */
     fun connect(url: String, headers: Map<String, String> = emptyMap(), runId: String? = null) {
-        disconnect()
-        expectingDisconnect = false
-        lastRunId = runId
-        hasFiredDisconnect = false
-
-        val requestBuilder = Request.Builder()
-            .url(url)
+        val request = Request.Builder().url(url)
             .header("Accept", "text/event-stream")
             .header("Cache-Control", "no-cache")
-
-        headers.forEach { (key, value) ->
-            requestBuilder.header(key, value)
-        }
-
-        val request = requestBuilder.build()
-        val newCall = client.newCall(request)
-        call = newCall
-
-        val job = SupervisorJob()
-        scope = CoroutineScope(Dispatchers.IO + job)
-
-        newCall.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                // Deliberate teardown after a terminal event — surface as a
-                // clean completion so the awaiter resumes. Otherwise route
-                // through the normal error path.
-                if (call.isCanceled() || expectingDisconnect) {
-                    onComplete?.invoke()
-                } else {
-                    onError?.invoke(e)
-                }
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                if (!response.isSuccessful) {
-                    onError?.invoke(HttpError(response.code))
-                    response.close()
-                    return
-                }
-
-                val source = response.body?.source()
-                if (source == null) {
-                    onError?.invoke(InvalidResponse)
-                    response.close()
-                    return
-                }
-
-                scope?.launch {
-                    try {
-                        processStream(source)
-                    } catch (e: Exception) {
-                        if (!call.isCanceled() && !expectingDisconnect) {
-                            withContext(NonCancellable + Dispatchers.Main) {
-                                onError?.invoke(e)
+            .apply { headers.forEach { (key, value) -> header(key, value) } }.build()
+        val next = Connection(client.newCall(request), runId, onEvent, onError, onComplete, onDisconnect)
+        callbacks.launch {
+            connection?.let { finish(it, DisconnectReason.LIFECYCLE) }
+            connection = next
+            next.job = launch(Dispatchers.IO) {
+                var receivedHeaders = false
+                val started = System.nanoTime()
+                try {
+                    next.call.await().use { response ->
+                        withContext(callbackDispatcher) {
+                            if (connection !== next) throw CancellationException()
+                            next.response = response
+                        }
+                        receivedHeaders = true
+                        if (response.code == 401 || response.code == 403) throw SSEFailure.Authentication(response.code)
+                        if (response.code != 200) throw SSEFailure.Http(response.code)
+                        if (response.body?.contentType()?.let { "${it.type}/${it.subtype}" } != "text/event-stream") {
+                            throw SSEFailure.ContentType
+                        }
+                        val source = response.body?.source() ?: throw SSEFailure.Malformed
+                        processStream(source) { event ->
+                            withContext(callbackDispatcher) {
+                                if (connection === next) next.event?.invoke(event)
                             }
                         }
-                    } finally {
-                        // Run cleanup under NonCancellable so `onComplete`
-                        // still fires when `disconnect()` cancelled the
-                        // scope in response to a terminal SSE event.
-                        withContext(NonCancellable) {
-                            response.close()
-                            withContext(Dispatchers.Main) { onComplete?.invoke() }
-                        }
+                        throw SSEFailure.UnexpectedEof
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    val elapsedMs = (System.nanoTime() - started) / 1_000_000
+                    val failure = when {
+                        e is SSEFailure -> e
+                        client.callTimeoutMillis > 0 && elapsedMs >= client.callTimeoutMillis -> SSEFailure.OverallTimeout
+                        e is java.net.SocketTimeoutException -> if (receivedHeaders) SSEFailure.IdleTimeout else SSEFailure.ConnectionTimeout
+                        e is IOException -> SSEFailure.Network
+                        else -> SSEFailure.Malformed
+                    }
+                    withContext(callbackDispatcher) {
+                        // use {} has already closed it on the I/O path.
+                        next.response = null
+                        finish(next, DisconnectReason.NETWORK, failure)
+                    }
+                } finally {
+                    next.call.cancel()
                 }
             }
-        })
+        }
     }
 
     /**
@@ -158,46 +139,37 @@ class SSEClient {
      *   without a runId the callback is a no-op.
      */
     fun disconnect(reason: DisconnectReason = DisconnectReason.EXPLICIT) {
-        val runId = lastRunId
-        expectingDisconnect = true
-        call?.cancel()
-        call = null
-        scope?.cancel()
-        scope = null
-        if (runId != null && !hasFiredDisconnect) {
-            hasFiredDisconnect = true
-            val captured = runId
-            // Fire on the main thread so hosts don't have to dispatch.
-            // Use a fresh, NonCancellable scope so a host cancelling its
-            // own scope in response to the callback doesn't prevent the
-            // signal from being delivered.
-            CoroutineScope(NonCancellable + Dispatchers.Main).launch {
-                onDisconnect?.invoke(captured, reason)
-            }
-        }
-        lastRunId = null
+        callbacks.launch { connection?.let { finish(it, reason) } }
     }
 
-    private suspend fun processStream(source: BufferedSource) {
-        var buffer = StringBuilder()
-
-        while (!source.exhausted()) {
-            val line = source.readUtf8Line() ?: break
-
-            if (line.isEmpty()) {
-                // Empty line = end of event
-                val eventText = buffer.toString()
-                buffer = StringBuilder()
-
-                if (eventText.isNotBlank()) {
-                    parseEvent(eventText)?.let { event ->
-                        withContext(Dispatchers.Main) { onEvent?.invoke(event) }
-                    }
-                }
-            } else {
-                buffer.appendLine(line)
-            }
+    private fun finish(target: Connection, reason: DisconnectReason, error: SSEFailure? = null) {
+        if (connection !== target) return
+        connection = null
+        target.call.cancel()
+        // Explicit teardown owns the accepted response too, including a blocked read.
+        try { target.response?.close() } catch (_: IOException) { /* The call is already cancelled. */ }
+        target.response = null
+        target.job?.cancel()
+        try {
+            target.runId?.let { target.disconnected?.invoke(it, reason) }
+        } finally {
+            if (error != null) target.error?.invoke(error) else target.complete?.invoke()
         }
+    }
+
+    internal suspend fun processStream(source: BufferedSource, emit: suspend (SSEEvent) -> Unit) {
+        val buffer = StringBuilder()
+        while (!source.exhausted()) {
+            val line = try { source.readUtf8LineStrict(1_048_576) } catch (_: java.io.EOFException) {
+                throw SSEFailure.Malformed
+            }
+            if (buffer.length + line.length > 1_048_576) throw SSEFailure.Malformed
+            if (line.isEmpty()) {
+                parseEvent(buffer.toString())?.let { emit(it) }
+                buffer.clear()
+            } else if (!line.startsWith(":")) buffer.appendLine(line)
+        }
+        if (buffer.isNotEmpty()) throw SSEFailure.Malformed
     }
 
     private fun parseEvent(text: String): SSEEvent? {
@@ -211,7 +183,7 @@ class SSEClient {
                     eventType = line.removePrefix("event:").trim()
                 }
                 line.startsWith("data:") -> {
-                    val dataLine = line.removePrefix("data:").trim()
+                    val dataLine = line.removePrefix("data:").removePrefix(" ")
                     if (data == null) data = StringBuilder(dataLine)
                     else data.append("\n").append(dataLine)
                 }

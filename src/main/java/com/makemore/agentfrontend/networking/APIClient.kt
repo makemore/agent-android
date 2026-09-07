@@ -21,14 +21,26 @@ import java.io.IOException
  */
 class APIClient(
     val config: ChatWidgetConfig,
-    val storage: StorageService
-) {
-    private var authToken: String? = config.authToken
-
-    internal val httpClient = OkHttpClient.Builder()
+    val storage: StorageService,
+    internal val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(java.time.Duration.ofSeconds(30))
         .readTimeout(java.time.Duration.ofSeconds(60))
-        .build()
+        .callTimeout(java.time.Duration.ofSeconds(90))
+        .build(),
+) {
+    @Volatile private var authToken: String? = config.authToken
+    @Volatile var sessionGeneration: Long = 0
+        private set
+
+    fun recoveryAccount(): String {
+        config.recoveryAccountId?.let { return it }
+        if (authStrategy == AuthStrategy.ANONYMOUS) {
+            return storage.get("pending_owner") ?: java.util.UUID.randomUUID().toString().also {
+                storage.set("pending_owner", it)
+            }
+        }
+        return authToken ?: "unauthenticated"
+    }
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -69,9 +81,10 @@ class APIClient(
     /** Get or create a session token */
     suspend fun getOrCreateSession(forceRefresh: Boolean = false): String? = withContext(Dispatchers.IO) {
         validateTransport()
+        val epoch = sessionGeneration
         val strategy = authStrategy
         if (strategy != AuthStrategy.ANONYMOUS) {
-            return@withContext authToken ?: config.authToken
+            return@withContext authToken
         }
 
         // Check existing token
@@ -91,25 +104,28 @@ class APIClient(
             .post("".toRequestBody("application/json".toMediaType()))
             .build()
 
-        val response = httpClient.newCall(request).await()
-        if (response.code != 200) throw SessionCreationFailed
-
-        val body = response.body?.string() ?: throw SessionCreationFailed
-        val tokenResponse = JSONObject(body)
-        val token = tokenResponse.getString("token")
-        authToken = token
-        storage.set(config.anonymousTokenKey, token)
-        token
+        httpClient.newCall(request).await().use { response ->
+            check(sessionGeneration == epoch) { "Account changed" }
+            if (response.code != 200) throw SessionCreationFailed
+            val token = JSONObject(response.body?.string() ?: throw SessionCreationFailed).getString("token")
+            if (forceRefresh && authToken != null && authToken != token) sessionGeneration++
+            authToken = token
+            storage.set(config.anonymousTokenKey, token)
+            token
+        }
     }
 
     /** Clear the stored session */
     fun clearSession() {
+        sessionGeneration++
         authToken = null
         storage.set(config.anonymousTokenKey, null)
+        storage.set("pending_owner", null)
     }
 
     /** Update auth token */
     fun setAuthToken(token: String?) {
+        if (authToken != token) sessionGeneration++
         authToken = token
     }
 
@@ -119,7 +135,7 @@ class APIClient(
     fun authHeaders(token: String? = null): Map<String, String> {
         val headers = mutableMapOf<String, String>()
         val strategy = authStrategy
-        val effectiveToken = token ?: authToken ?: config.authToken
+        val effectiveToken = token ?: authToken
 
         when (strategy) {
             AuthStrategy.TOKEN, AuthStrategy.JWT -> {

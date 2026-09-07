@@ -53,9 +53,11 @@ class KeystoreEncryptedStorage(
         return generator.generateKey()
     }
 
-    override fun set(key: String, value: String?) {
+    override fun set(key: String, value: String?) = setDurably(key, value)
+
+    override fun setDurably(key: String, value: String?) {
         if (value == null) {
-            prefs.edit().remove(key).apply()
+            check(prefs.edit().remove(key).commit()) { "Unable to clear encrypted storage" }
             return
         }
         val cipher = Cipher.getInstance(TRANSFORM)
@@ -65,7 +67,9 @@ class KeystoreEncryptedStorage(
         val blob = ByteArray(iv.size + ct.size)
         System.arraycopy(iv, 0, blob, 0, iv.size)
         System.arraycopy(ct, 0, blob, iv.size, ct.size)
-        prefs.edit().putString(key, Base64.encodeToString(blob, Base64.NO_WRAP)).apply()
+        check(prefs.edit().putString(key, Base64.encodeToString(blob, Base64.NO_WRAP)).commit()) {
+            "Unable to persist encrypted storage"
+        }
     }
 
     override fun get(key: String): String? {
@@ -100,7 +104,7 @@ class SecureStorageService(
     fun isSecure(key: String): Boolean {
         if (key in explicitSecureKeys) return true
         val k = key.lowercase()
-        return "token" in k || "memor" in k || "secret" in k || "auth" in k
+        return "token" in k || "memor" in k || "secret" in k || "auth" in k || "pending_run" in k
     }
 
     override fun get(key: String): String? =
@@ -108,6 +112,10 @@ class SecureStorageService(
 
     override fun set(key: String, value: String?) {
         (if (isSecure(key)) secure else standard).set(key, value)
+    }
+
+    override fun setDurably(key: String, value: String?) {
+        (if (isSecure(key)) secure else standard).setDurably(key, value)
     }
 
     companion object {

@@ -20,6 +20,8 @@ data class Message(
      *  to full Markdown once the stream completes — avoids visible
      *  reflow/jitter from per-token re-parsing. */
     val isStreaming: Boolean = false,
+    /** Server ordering identity; absent on local/provisional messages. */
+    val seq: Long? = null,
 )
 
 /** Message role */

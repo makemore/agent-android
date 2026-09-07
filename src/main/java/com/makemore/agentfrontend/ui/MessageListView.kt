@@ -19,6 +19,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.dp
 import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
@@ -90,14 +92,13 @@ fun MessageListView(
 
     // Filter out tool/system messages when showToolMessages is off
     // Keep a list of (originalIndex, message) so retry/edit callbacks use the right index
-    val displayMessages = remember(messages.size, messages.lastOrNull()?.content, config.showToolMessages) {
-        messages.mapIndexed { index, msg -> index to msg }.filter { (_, msg) ->
+    // Read every row: an authoritative repair can change a non-tail streaming row.
+    val displayMessages = messages.mapIndexed { index, msg -> index to msg }.filter { (_, msg) ->
             if (!config.showToolMessages) {
                 val isToolMsg = msg.type == MessageType.TOOL_CALL || msg.type == MessageType.TOOL_RESULT
                 val isSystemMsg = msg.role == MessageRole.SYSTEM && !isToolMsg
                 !isToolMsg && !isSystemMsg
             } else true
-        }
     }
 
     // Follow state is derived from position, not latched — but it has to be
@@ -123,6 +124,24 @@ fun MessageListView(
     // A single collector processes every height change in order and is
     // never cancelled underneath itself.
     var hasLanded by remember { mutableStateOf(false) }
+    var prependAnchor by remember { mutableStateOf<HistoryScrollAnchor?>(null) }
+    var measuredAnchorY by remember { mutableStateOf<Float?>(null) }
+    val rowPositions = remember { mutableMapOf<String, Float>() }
+    val currentFirstId by rememberUpdatedState(displayMessages.firstOrNull()?.second?.id)
+    val currentLoadingMore by rememberUpdatedState(loadingMoreMessages)
+    LaunchedEffect(measuredAnchorY, loadingMoreMessages) {
+        val anchor = prependAnchor ?: return@LaunchedEffect
+        val measuredY = measuredAnchorY
+        if (measuredY != null) {
+            prependAnchor = null
+            measuredAnchorY = null
+            scrollState.scrollTo(anchor.target(scrollState.value, measuredY))
+        } else if (!loadingMoreMessages) {
+            // Failed, duplicate-only or entirely hidden page: do not anchor a later update.
+            withFrameNanos { }
+            if (!currentLoadingMore && measuredAnchorY == null) prependAnchor = null
+        }
+    }
     LaunchedEffect(Unit) {
         snapshotFlow { scrollState.maxValue }.collect { max ->
             if (max == 0) return@collect
@@ -137,6 +156,8 @@ fun MessageListView(
                 hasLanded = true
                 return@collect
             }
+
+            if (prependAnchor != null) return@collect
 
             if (scrollState.value < grewFrom - BOTTOM_SLOP_PX) return@collect
             scrollState.scrollTo(max)
@@ -268,7 +289,13 @@ fun MessageListView(
                         if (loadingMoreMessages) {
                             CircularProgressIndicator(modifier = Modifier.size(24.dp).padding(8.dp))
                         } else {
-                            TextButton(onClick = onLoadMore) {
+                            TextButton(onClick = {
+                                measuredAnchorY = null
+                                prependAnchor = currentFirstId?.let { id ->
+                                    rowPositions[id]?.let { HistoryScrollAnchor(id, it) }
+                                }
+                                onLoadMore()
+                            }) {
                                 Icon(Icons.Default.KeyboardArrowUp, contentDescription = null, modifier = Modifier.size(14.dp))
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Load earlier messages", style = MaterialTheme.typography.labelSmall)
@@ -282,7 +309,17 @@ fun MessageListView(
                 // bottom needs no reserved space, and the reserved space was
                 // itself what made a scroll to the tail land at its top.
                 displayMessages.forEach { pair ->
-                    key(pair.second.id) { messageRow(pair) }
+                    key(pair.second.id) {
+                        Box(Modifier.onGloballyPositioned { coordinates ->
+                            val y = coordinates.positionInRoot().y + scrollState.value
+                            rowPositions[pair.second.id] = y
+                            val anchor = prependAnchor
+                            if (anchor?.messageId == pair.second.id &&
+                                (currentFirstId != anchor.messageId || !currentLoadingMore)) {
+                                measuredAnchorY = y
+                            }
+                        }) { messageRow(pair) }
+                    }
                 }
                 statusIndicator()
             }

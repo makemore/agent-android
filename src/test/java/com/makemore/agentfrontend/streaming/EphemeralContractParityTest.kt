@@ -87,7 +87,9 @@ class EphemeralContractParityTest {
         val vm = ChatViewModel(config, apiClient, storage)
 
         for (t in 0 until turns.length()) {
-            vm.sendMessage(turns.getString(t))
+            // Await terminal cleanup, not just isLoading=false: the latter is
+            // published before the pending-send record is durably cleared.
+            vm.sendMessageAndAwait(turns.getString(t))
             // Each turn must add exactly one assistant reply before the next
             // turn fires, otherwise the re-sent history is short. Waiting on
             // the assistant COUNT (not content) is essential here because
@@ -194,7 +196,9 @@ class EphemeralContractParityTest {
         }
         fail(
             "waitForAssistantCount timed out after ${timeoutMs}ms " +
-                "(isLoading=${vm.isLoading.value}, want $expected assistant msgs)"
+                "(isLoading=${vm.isLoading.value}, state=${vm.runState.value}, " +
+                "error=${vm.error.value}, roles=${vm.messages.map { it.role to it.type }}, " +
+                "want $expected assistant msgs)"
         )
     }
 

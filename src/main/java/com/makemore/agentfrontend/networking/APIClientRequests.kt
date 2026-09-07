@@ -38,19 +38,22 @@ suspend fun APIClient.loadConversations(): List<Conversation> = withContext(Disp
 }
 
 /** Load a specific conversation */
-suspend fun APIClient.loadConversation(id: String, limit: Int = 10, offset: Int = 0): Conversation =
+suspend fun APIClient.loadConversation(id: String, limit: Int = 50, offset: Int = 0, beforeSeq: Int? = null): Conversation =
     withContext(Dispatchers.IO) {
+        val epoch = sessionGeneration
         val token = getOrCreateSession()
-        val path = "${config.apiPaths.conversations}$id/?limit=$limit&offset=$offset"
+        check(sessionGeneration == epoch) { "Account changed" }
+        val path = config.apiPaths.conversationPageUrl(id, limit, offset, beforeSeq)
         val request = buildRequest(path, "GET", token = token)
 
-        val response = httpClient.newCall(request).await()
-
-        if (response.code == 404) throw NotFound
-        if (response.code != 200) throw HttpError(response.code)
-
-        val body = response.body?.string() ?: throw InvalidResponse
-        json.decodeFromString<Conversation>(body)
+        httpClient.newCall(request).await().use { response ->
+            check(sessionGeneration == epoch) { "Account changed" }
+            if (response.code == 401 || response.code == 403) throw Unauthorized
+            if (response.code == 404) throw NotFound
+            if (response.code == 410) throw RunExpired
+            if (response.code != 200) throw HttpError(response.code)
+            json.decodeFromString<Conversation>(response.body?.string() ?: throw InvalidResponse)
+        }
     }
 
 // -- Runs --
@@ -77,11 +80,12 @@ suspend fun APIClient.createRun(
     ephemeral: Boolean = false,
     privateOnly: Boolean = false,
     memories: List<Map<String, String>>? = null,
-    params: Map<String, Any>? = null
+    params: Map<String, Any>? = null,
+    idempotencyKey: String = java.util.UUID.randomUUID().toString(),
+    beforePost: suspend (String) -> Unit = {},
 ): AgentRun = withContext(Dispatchers.IO) {
-    val token = getOrCreateSession()
-
     val body = JSONObject().apply {
+        put("idempotency_key", idempotencyKey)
         put("agentKey", agentKeyOverride ?: config.agentKey)
         put("messages", JSONArray().apply {
             messages.forEach { msg ->
@@ -118,44 +122,64 @@ suspend fun APIClient.createRun(
         }
     }
 
-    val requestBody = body.toString().toRequestBody("application/json".toMediaType())
-    val request = buildRequest(config.apiPaths.runs, "POST", requestBody, token)
+    val originalBody = body.toString()
+    beforePost(originalBody)
+    createRunFromBody(originalBody)
+}
 
-    var response = httpClient.newCall(request).await()
-
-    if (response.code == 401) {
-        // Try refreshing token
-        clearSession()
-        val newToken = getOrCreateSession(forceRefresh = true)
-        val retryRequest = buildRequest(config.apiPaths.runs, "POST", requestBody, newToken)
-        response = httpClient.newCall(retryRequest).await()
-        if (response.code !in listOf(200, 201)) throw Unauthorized
+/** Retries must use the original persisted bytes, not rebuilt preferences/history. */
+suspend fun APIClient.createRunFromBody(originalBody: String): AgentRun = withContext(Dispatchers.IO) {
+    require(JSONObject(originalBody).optString("idempotency_key").isNotBlank())
+    val requestBody = originalBody.toRequestBody("application/json".toMediaType())
+    val epoch = sessionGeneration
+    for (attempt in 0..1) {
+        val token = getOrCreateSession(forceRefresh = attempt == 1)
+        check(sessionGeneration == epoch) { "Account changed" }
+        val request = buildRequest(config.apiPaths.runs, "POST", requestBody, token)
+        httpClient.newCall(request).await().use { response ->
+            check(sessionGeneration == epoch) { "Account changed" }
+            if (response.code == 401 && attempt == 0) return@use
+            if (response.code == 401 || response.code == 403) throw Unauthorized
+            if (response.code == 410) throw RunExpired
+            if (response.code !in listOf(200, 201)) throw HttpError(response.code)
+            return@withContext json.decodeFromString<AgentRun>(response.body?.string() ?: throw InvalidResponse)
+        } // The rejected response is CLOSED before refreshing or issuing another call.
     }
+    throw Unauthorized
+}
 
-    if (response.code !in listOf(200, 201)) {
-        val errorBody = response.body?.string()
-        if (errorBody != null) {
-            try {
-                val errorJson = JSONObject(errorBody)
-                val msg = errorJson.optString("error") ?: errorJson.optString("detail")
-                if (msg.isNotEmpty()) throw ServerError(msg)
-            } catch (_: Exception) { }
+suspend fun APIClient.loadRun(id: String): AgentRun = loadRunPath(config.apiPaths.runDetailUrl(id))
+
+suspend fun APIClient.loadRunByIdempotencyKey(key: String): AgentRun =
+    loadRunPath(config.apiPaths.runByIdempotencyKeyUrl(key))
+
+private suspend fun APIClient.loadRunPath(path: String): AgentRun = withContext(Dispatchers.IO) {
+    val epoch = sessionGeneration
+    val token = getOrCreateSession()
+    check(sessionGeneration == epoch) { "Account changed" }
+    httpClient.newCall(buildRequest(path, token = token)).await().use { response ->
+        check(sessionGeneration == epoch) { "Account changed" }
+        when (response.code) {
+            401, 403 -> throw Unauthorized
+            404 -> throw NotFound
+            410 -> throw RunExpired
+            200 -> json.decodeFromString<AgentRun>(response.body?.string() ?: throw InvalidResponse)
+            else -> throw HttpError(response.code)
         }
-        throw HttpError(response.code)
     }
-
-    val responseBody = response.body?.string() ?: throw InvalidResponse
-    json.decodeFromString<AgentRun>(responseBody)
 }
 
 /** Cancel a run */
 suspend fun APIClient.cancelRun(id: String): Unit = withContext(Dispatchers.IO) {
+    val epoch = sessionGeneration
     val token = getOrCreateSession()
+    check(sessionGeneration == epoch) { "Account changed" }
     val path = config.apiPaths.cancelRunUrl(id)
     val request = buildRequest(path, "POST", token = token)
 
-    val response = httpClient.newCall(request).await()
-    if (response.code !in 200..204) throw CancelFailed
+    httpClient.newCall(request).await().use { response ->
+        if (response.code !in 200..204) throw CancelFailed
+    }
 }
 
 // -- Systems Discovery --

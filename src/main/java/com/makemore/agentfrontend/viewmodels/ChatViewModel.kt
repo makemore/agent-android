@@ -14,9 +14,15 @@ import com.makemore.agentfrontend.services.LocalConversationSummary
 import com.makemore.agentfrontend.services.LocalHistoryStore
 import com.makemore.agentfrontend.services.LocalMessage
 import com.makemore.agentfrontend.services.StorageService
+import com.makemore.agentfrontend.services.KeystoreEncryptedStorage
+import com.makemore.agentfrontend.services.PendingRun
+import com.makemore.agentfrontend.services.PendingRunStore
+import com.makemore.agentfrontend.services.PendingMessage
 import com.makemore.agentfrontend.voice.Emotion
 import com.makemore.agentfrontend.voice.VoiceController
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -31,8 +37,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
-import java.net.URLEncoder
 import java.util.Date
+import java.util.UUID
 
 /**
  * Main view model for chat functionality.
@@ -42,7 +48,8 @@ class ChatViewModel(
     private val config: ChatWidgetConfig,
     val apiClient: APIClient,
     private val storage: StorageService,
-    private val context: Context? = null
+    private val context: Context? = null,
+    private val sseFactory: () -> SSEClient = { SSEClient() },
 ) : ViewModel() {
 
     // -- Observable State --
@@ -238,6 +245,29 @@ class ChatViewModel(
     private var sseClient: SSEClient? = null
     private var assistantContent: String = ""
     private var hasRestoredConversation: Boolean = false
+    private var nextBeforeSeq: Int? = null
+    private var operationGeneration = 0L
+    private var invalidated = false
+    private var lastEventSeq: Long? = null
+    private val accountGeneration = apiClient.sessionGeneration
+    private val recoveryAccount = apiClient.recoveryAccount()
+    private var foreground = true
+    private var recoveryJob: Job? = null
+    private var reconstructing = false
+    private var receivedVoiceDelta = false
+    private var receivedAuthoritativeMessage = false
+    private val runMessageIds = mutableSetOf<String>()
+    private val pendingStore by lazy {
+        val scope = PendingRunStore.scope(config.backendUrl, recoveryAccount, config.agentKey, config.defaultJourneyType)
+        PendingRunStore(
+            context?.let { KeystoreEncryptedStorage(it.applicationContext, "agent_pending_runs") } ?: storage,
+            scope,
+            PendingRunStore.scope(config.backendUrl, recoveryAccount, ""),
+        )
+    }
+
+    private fun owns(generation: Long): Boolean =
+        !invalidated && operationGeneration == generation && accountGeneration == apiClient.sessionGeneration
 
     // -- Streaming buffer --
     // Decouples network receive rate from visual display rate. Providers emit
@@ -373,8 +403,12 @@ class ChatViewModel(
 
     /** Restore the saved conversation on launch */
     fun restoreConversationIfNeeded() {
-        if (hasRestoredConversation) return
+        if (hasRestoredConversation || invalidated) return
         hasRestoredConversation = true
+        if (pendingStore.load() != null) {
+            onForeground()
+            return
+        }
 
         // Ephemeral mode: nothing to restore from the server.
         if (config.ephemeral) return
@@ -440,7 +474,19 @@ class ChatViewModel(
         hidden: Boolean = false
     ) {
         val trimmed = content.trim()
-        if (trimmed.isEmpty() || isLoading.value) return
+        if (!foreground || !owns(operationGeneration) || trimmed.isEmpty() || isLoading.value) return
+        if (pendingStore.load() != null) {
+            error.value = "A reply is still pending. Recover it or cancel before sending another message."
+            onForeground()
+            return
+        }
+        val generation = ++operationGeneration
+        loadingMoreMessages.value = false
+        val key = UUID.randomUUID().toString()
+        runMessageIds.clear()
+        reconstructing = false
+        receivedVoiceDelta = false
+        receivedAuthoritativeMessage = false
 
         isLoading.value = true
         runState.value = RunState.SENDING
@@ -494,9 +540,24 @@ class ChatViewModel(
                 ephemeral = config.ephemeral,
                 privateOnly = config.privateOnly,
                 memories = if (config.ephemeral) clientMemories else null,
-                params = resolvedParams.ifEmpty { null }
+                params = resolvedParams.ifEmpty { null },
+                idempotencyKey = key,
+                beforePost = { body ->
+                    withContext(Dispatchers.Main.immediate) {
+                        if (!owns(generation)) throw CancellationException()
+                        pendingStore.save(PendingRun(
+                            scope = pendingStore.scope, key = key, requestBody = body,
+                            baseline = messages.map { PendingMessage(it) },
+                            createdAt = System.currentTimeMillis(), conversationId = conversationId.value,
+                            messagesOffset = messagesOffset, nextBeforeSeq = nextBeforeSeq,
+                            hasMoreMessages = hasMoreMessages.value,
+                        ))
+                    }
+                },
             )
 
+            if (!owns(generation)) return
+            acknowledgeRun(run)
             currentRunId = run.id
             runState.value = RunState.STREAMING
 
@@ -517,53 +578,43 @@ class ChatViewModel(
             // reaches a terminal state.
             subscribeToEvents(run.id)
 
+        } catch (e: CancellationException) {
+            if (owns(generation)) detachStream(DisconnectReason.LIFECYCLE)
+            throw e
         } catch (e: Exception) {
-            error.value = e.message
-            isLoading.value = false
-            runState.value = RunState.FAILED
-            resolveStreamCompletion()
+            if (!owns(generation)) return
+            if (pendingStore.load() != null && isRecoverable(e)) {
+                try {
+                    reconcilePending(generation)
+                } catch (cancelled: CancellationException) {
+                    if (owns(generation)) detachStream(DisconnectReason.LIFECYCLE)
+                    throw cancelled
+                }
+            } else {
+                showRecoveryError(e)
+            }
         }
     }
 
     /** Cancel the current run */
     fun cancelRun() {
-        val runId = currentRunId ?: return
-        if (!isLoading.value) return
-
+        val pending = pendingStore.load()
+        val runId = currentRunId ?: pending?.runId
+        if (pending == null && runId == null) return
+        detachStream(DisconnectReason.EXPLICIT)
+        pendingStore.clear(pending?.key)
+        isLoading.value = false
+        runState.value = RunState.CANCELLED
+        currentRunId = null
+        voiceController?.stop()
         viewModelScope.launch {
             try {
-                runState.value = RunState.CANCELLING
-                apiClient.cancelRun(runId)
-                sseClient?.disconnect(DisconnectReason.EXPLICIT)
-                sseClient = null
-                // Drop any buffered-but-not-yet-drained characters and stop the
-                // typewriter loop. Without this, the drain job keeps revealing
-                // whatever the server sent before the disconnect — the user sees
-                // text continuing to type for seconds after tapping Stop. This
-                // differs from the natural-end path (`handleTerminalEvent`) which
-                // deliberately lets the drain finish smoothly.
-                resetStreamBuffer()
-                // Clear any in-flight sub-agent activity so the pill
-                // disappears immediately on Stop.
-                subAgentActivity.value = SubAgentActivityState()
-                // Cut off any in-flight TTS playback when the user cancels.
-                voiceController?.stop()
-                isLoading.value = false
-                runState.value = RunState.CANCELLED
-                currentRunId = null
-
-                messages.add(Message(
-                    role = MessageRole.SYSTEM,
-                    content = "⏹ Run cancelled",
-                    type = MessageType.CANCELLED
-                ))
-                // Wake any awaiter inside `subscribeToEvents`.
-                resolveStreamCompletion()
-            } catch (e: Exception) {
-                // Silently fail cancel — but still wake the awaiter so a
-                // pending `sendMessageAndAwait` doesn't hang forever.
-                resolveStreamCompletion()
-            }
+                if (invalidated || accountGeneration != apiClient.sessionGeneration) return@launch
+                // A missing acknowledgement is resolved by GET, never by POST during cancellation.
+                val acceptedId = runId ?: pending?.let { apiClient.loadRunByIdempotencyKey(it.key).id }
+                if (invalidated || accountGeneration != apiClient.sessionGeneration) return@launch
+                acceptedId?.let { apiClient.cancelRun(it) }
+            } catch (_: Exception) { /* Locally cancelled; never restart generation. */ }
         }
     }
 
@@ -571,6 +622,8 @@ class ChatViewModel(
      *  Does NOT delete the conversation from local storage — it just
      *  starts a new in-memory conversation. */
     fun clearMessages() {
+        detachStream(DisconnectReason.EXPLICIT)
+        pendingStore.clear()
         messages.clear()
         subAgentActivity.value = SubAgentActivityState()
         conversationId.value = null
@@ -578,7 +631,10 @@ class ChatViewModel(
         error.value = null
         hasMoreMessages.value = false
         messagesOffset = 0
+        nextBeforeSeq = null
         runState.value = RunState.IDLE
+        currentRunId = null
+        runMessageIds.clear()
         // Reset per-conversation reasoning toggle so a new chat starts
         // with thinking off — matches the iOS behaviour.
         extendedThinking.value = false
@@ -721,8 +777,14 @@ class ChatViewModel(
     /** Hydrates the VM with a locally-persisted conversation.
      *  Returns true if the conversation was found and loaded. */
     fun loadLocalConversation(id: String): Boolean {
+        if (!owns(operationGeneration)) return false
+        if (pendingStore.load() != null) {
+            error.value = "Recover or cancel the pending reply before changing conversations."
+            return false
+        }
         val store = localHistoryStore ?: return false
         val conv = store.load(id) ?: return false
+        detachStream(DisconnectReason.LIFECYCLE)
         messages.clear()
         messages.addAll(conv.messages.map { it.toMessage() })
         conversationId.value = id
@@ -730,6 +792,8 @@ class ChatViewModel(
         storage.set(config.conversationIdKey, id)
         hasMoreMessages.value = false
         messagesOffset = 0
+        nextBeforeSeq = null
+        runState.value = RunState.IDLE
         error.value = null
         // Restored history already contains earlier assistant turns —
         // the first-assistant lifecycle hook fires only for *new*
@@ -748,8 +812,17 @@ class ChatViewModel(
 
     /** Purge all locally-persisted conversations for this agent. */
     fun purgeLocalHistory() {
+        clearMessages()
         localHistoryStore?.purgeAll()
         localConversations.clear()
+    }
+
+    /** Privacy purge also removes sends on other agent surfaces, without logging out. */
+    fun purgeConversationData() {
+        purgeLocalHistory()
+        pendingStore.clearAccount()
+        storage.set(MEMORIES_STORAGE_KEY, null)
+        clientMemories.clear()
     }
 
     /**
@@ -759,13 +832,10 @@ class ChatViewModel(
      * stored auth/anonymous token (removed from the encrypted store).
      */
     fun clearAllLocalData() {
-        purgeLocalHistory()
-        storage.set(MEMORIES_STORAGE_KEY, null)
-        clientMemories.clear()
-        messages.clear()
-        conversationId.value = null
-        storage.set(config.conversationIdKey, null)
-        apiClient.clearSession()
+        invalidated = true
+        purgeConversationData()
+        // A retired VM must never clear credentials installed for its replacement.
+        if (accountGeneration == apiClient.sessionGeneration) apiClient.clearSession()
     }
 
     // -- System Selection --
@@ -894,6 +964,16 @@ class ChatViewModel(
 
     /** Load a specific conversation */
     fun loadConversation(convId: String) {
+        if (!owns(operationGeneration)) return
+        if (pendingStore.load() != null) {
+            error.value = "Recover or cancel the pending reply before changing conversations."
+            return
+        }
+        detachStream(DisconnectReason.LIFECYCLE)
+        val generation = operationGeneration
+        hasMoreMessages.value = false
+        messagesOffset = 0
+        nextBeforeSeq = null
         // Ephemeral mode: conversation is local-only, nothing to fetch.
         if (config.ephemeral) {
             conversationId.value = convId
@@ -908,11 +988,13 @@ class ChatViewModel(
 
             try {
                 val conversation = apiClient.loadConversation(convId)
+                if (!owns(generation) || conversationId.value != convId) return@launch
                 conversation.messages?.forEach { apiMsg ->
                     messages.addAll(mapApiMessage(apiMsg))
                 }
                 hasMoreMessages.value = conversation.hasMore ?: false
                 messagesOffset = conversation.messages?.size ?: 0
+                nextBeforeSeq = conversation.nextBeforeSeq
                 // Suppress the first-assistant lifecycle hook for restored
                 // conversations that already contain an assistant turn.
                 firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
@@ -925,43 +1007,60 @@ class ChatViewModel(
                 // (banner stays hidden) — never crashes the load.
                 applySnapshotFromMetadata(conversation.metadata)
             } catch (e: NotFound) {
+                if (!owns(generation)) return@launch
                 conversationId.value = null
                 storage.set(config.conversationIdKey, null)
             } catch (e: Exception) {
                 // Silently fail
             }
-            isLoading.value = false
+            if (owns(generation)) isLoading.value = false
         }
     }
 
     /** Load more messages (pagination) */
     fun loadMoreMessages() {
+        if (config.ephemeral || !owns(operationGeneration)) return // Never page client-owned context.
         val convId = conversationId.value ?: return
         if (loadingMoreMessages.value || !hasMoreMessages.value) return
+        val generation = operationGeneration
 
         loadingMoreMessages.value = true
         viewModelScope.launch {
             try {
-                val conversation = apiClient.loadConversation(convId, limit = 10, offset = messagesOffset)
+                val conversation = apiClient.loadConversation(convId, limit = 50, offset = messagesOffset, beforeSeq = nextBeforeSeq)
+                if (!owns(generation) || conversationId.value != convId) return@launch
                 val apiMessages = conversation.messages
                 if (apiMessages != null && apiMessages.isNotEmpty()) {
-                    val olderMessages = apiMessages.flatMap { mapApiMessage(it) }
+                    val existing = messages.map { it.id }.toMutableSet()
+                    val olderMessages = apiMessages.flatMap { mapApiMessage(it) }.filter { existing.add(it.id) }
                     messages.addAll(0, olderMessages)
                     messagesOffset += apiMessages.size
+                    nextBeforeSeq = conversation.nextBeforeSeq
                     hasMoreMessages.value = conversation.hasMore ?: false
                 } else {
                     hasMoreMessages.value = false
                 }
+                pendingStore.load()?.let { pending ->
+                    // Keep pre-run context plus newly loaded older pages for cold reconstruction.
+                    val baselineIds = pending.baseline.map { it.id }.toSet()
+                    val baseline = messages.filter { it.id in baselineIds || it.id !in runMessageIds }
+                    pendingStore.save(pending.copy(baseline = baseline.map { PendingMessage(it) },
+                        messagesOffset = messagesOffset, nextBeforeSeq = nextBeforeSeq,
+                        hasMoreMessages = hasMoreMessages.value))
+                }
             } catch (e: Exception) {
                 // Silently fail
             }
-            loadingMoreMessages.value = false
+            if (owns(generation)) loadingMoreMessages.value = false
         }
     }
 
     /** Edit a message and resend from that point */
     fun editMessage(index: Int, newContent: String, model: String? = null, thinking: Boolean = false) {
-        if (isLoading.value || index >= messages.size) return
+        if (!owns(operationGeneration)) return
+        if (pendingStore.load() != null) { onForeground(); return }
+        if (isLoading.value || index !in messages.indices) return
+        if (!canSupersedeLoadedHistory()) return
         if (messages[index].role != MessageRole.USER) return
 
         // Truncate
@@ -971,7 +1070,10 @@ class ChatViewModel(
 
     /** Retry from a specific message */
     fun retryMessage(index: Int, model: String? = null, thinking: Boolean = false) {
-        if (isLoading.value || index >= messages.size) return
+        if (!owns(operationGeneration)) return
+        if (pendingStore.load() != null) { onForeground(); return }
+        if (isLoading.value || index !in messages.indices) return
+        if (!canSupersedeLoadedHistory()) return
 
         val messageAtIndex = messages[index]
         var userMessageIndex = index
@@ -992,6 +1094,241 @@ class ChatViewModel(
         sendMessage(userMessage.content, model = model, thinking = thinking, supersedeFromMessageIndex = userMessageIndex)
     }
 
+    private fun canSupersedeLoadedHistory(): Boolean {
+        if (!config.ephemeral && hasMoreMessages.value) {
+            error.value = "Load earlier messages before editing or retrying this conversation."
+            return false // A paged display index is not a full-conversation index.
+        }
+        return true
+    }
+
+    // -- Durable delivery recovery --
+
+    /** Called on cold launch and every foreground transition; retries are bounded per transition. */
+    fun onForeground() {
+        if (invalidated) return
+        foreground = true
+        if (accountGeneration != apiClient.sessionGeneration) {
+            clearAllLocalData()
+            return
+        }
+        if (sseClient != null || isLoading.value || recoveryJob?.isActive == true) return
+        if (pendingStore.load() == null) return
+        recoveryJob = viewModelScope.launch { recoverPendingAndAwait() }
+    }
+
+    internal suspend fun recoverPendingAndAwait() {
+        if (!foreground || !owns(operationGeneration) || sseClient != null) return
+        val generation = ++operationGeneration
+        loadingMoreMessages.value = false
+        try {
+            reconcilePending(generation)
+        } catch (e: CancellationException) {
+            if (owns(generation)) detachStream(DisconnectReason.LIFECYCLE)
+            throw e
+        }
+    }
+
+    /** Backgrounding detaches transport, not ownership of an accepted send. */
+    fun onBackground() {
+        foreground = false
+        detachStream(DisconnectReason.LIFECYCLE)
+    }
+
+    /** For hosts that create VMs with remember rather than a ViewModelStore. */
+    fun dispose() {
+        onBackground()
+        invalidated = true
+        viewModelScope.cancel()
+    }
+
+    private fun detachStream(reason: DisconnectReason) {
+        operationGeneration++
+        recoveryJob?.cancel()
+        recoveryJob = null
+        val previous = sseClient
+        sseClient = null
+        previous?.disconnect(reason)
+        closeStreamingSession()
+        subAgentActivity.value = SubAgentActivityState()
+        voiceController?.stop()
+        isLoading.value = false
+        loadingMoreMessages.value = false
+        resolveStreamCompletion()
+    }
+
+    private fun acknowledgeRun(run: AgentRun) {
+        val pending = pendingStore.load() ?: return
+        pendingStore.save(pending.copy(runId = run.id, conversationId = run.conversationId ?: pending.conversationId))
+        currentRunId = run.id
+    }
+
+    private object RecoveryPolicyChanged : Exception("Pending send uses an earlier privacy policy")
+
+    private fun isRecoverable(failure: Throwable): Boolean = when (failure) {
+        is SSEFailure -> failure.retryable
+        is HttpError -> failure.statusCode == 408 || failure.statusCode == 429 || failure.statusCode >= 500
+        is java.io.IOException, is kotlinx.serialization.SerializationException -> true
+        InvalidResponse -> true // A malformed acceptance response is an ambiguous acknowledgement.
+        else -> false
+    }
+
+    private fun showRecoveryError(failure: Throwable) {
+        closeStreamingSession()
+        isLoading.value = false
+        runState.value = RunState.FAILED
+        error.value = if (failure == RunExpired) {
+            "This reply is no longer available (expired or deleted)."
+        } else if (failure == NotFound) {
+            "This reply is unknown or no longer accessible. It has not been sent again."
+        } else if (failure == Unauthorized || failure is SSEFailure.Authentication) {
+            "Please sign in again to recover this reply."
+        } else if (failure == RecoveryPolicyChanged) {
+            "Your saved send uses an earlier privacy setting. Cancel it before starting a new message."
+        } else if (pendingStore.load() != null) {
+            "Reply delivery was interrupted. Your send is saved; reopen the app to recover it, or cancel."
+        } else {
+            "Unable to safely save or send this message. Please try again."
+        }
+        if (failure == RunExpired || failure == NotFound) pendingStore.clear()
+        voiceController?.stop()
+        resolveStreamCompletion()
+    }
+
+    private suspend fun reconcilePending(generation: Long) {
+        var lastFailure: Throwable = SSEFailure.Network
+        for (attempt in 0 until 4) {
+            if (!owns(generation) || !foreground) return
+            if (attempt > 0) delay(500L shl (attempt - 1))
+            if (!owns(generation) || !foreground) return
+            val pending = pendingStore.load() ?: return
+            hasRestoredConversation = true
+            if (messages.isEmpty()) {
+                messages.addAll(pending.baseline.map { it.message() })
+                messagesOffset = pending.messagesOffset
+                nextBeforeSeq = pending.nextBeforeSeq
+                hasMoreMessages.value = pending.hasMoreMessages
+                firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
+            }
+            isLoading.value = true
+            error.value = null
+            try {
+                // Never recreate an expired ephemeral run, even if an old server returns 404.
+                if (config.ephemeral && System.currentTimeMillis() - pending.createdAt >= 86_400_000L) throw RunExpired
+                val runId = pending.runId
+                val run = if (runId != null) apiClient.loadRun(runId) else {
+                    try {
+                        apiClient.loadRunByIdempotencyKey(pending.key)
+                    } catch (_: NotFound) {
+                        if (!owns(generation) || !foreground) return
+                        if (!pending.mayRetryCreation(System.currentTimeMillis())) throw NotFound
+                        val original = org.json.JSONObject(pending.requestBody)
+                        if ((config.privateOnly && !original.optBoolean("private_only")) ||
+                            (config.ephemeral && !original.optBoolean("ephemeral"))) throw RecoveryPolicyChanged
+                        pendingStore.save(pending.copy(creationAttempts = pending.creationAttempts + 1))
+                        apiClient.createRunFromBody(pending.requestBody)
+                    }
+                }
+                if (!owns(generation) || !foreground) return
+                acknowledgeRun(run)
+                conversationId.value = run.conversationId ?: pending.conversationId
+                if (!config.ephemeral) storage.set(config.conversationIdKey, conversationId.value)
+                reconstructing = true
+                voiceController?.stop()
+                val output = run.output?.toAnyMap() ?: emptyMap()
+                when (run.status?.lowercase()) {
+                    "succeeded", "completed" -> {
+                        if (!applyAuthoritativeOutput(output)) throw InvalidResponse
+                        handleTerminalEvent("run.succeeded", emptyMap())
+                        return
+                    }
+                    "failed", "timed_out", "cancelled", "canceled" -> {
+                        applyAuthoritativeOutput(output)
+                        val type = if (run.status.equals("canceled", ignoreCase = true)) "cancelled" else run.status?.lowercase()
+                        handleTerminalEvent("run.$type", mapOf("error" to (run.error?.toAnyValue() ?: "Agent run failed")))
+                        return
+                    }
+                    "waiting", "suspended" -> {
+                        applyAuthoritativeOutput(output)
+                        handleRequiredAction(output)
+                        return // Waiting is retained, not retried and not marked failed.
+                    }
+                    null, "pending", "queued", "running", "retrying" -> {
+                        // No cursor is persisted without reducer state. Rebuild this run only,
+                        // preserving the full local/ephemeral context and any older UI pages.
+                        resetStreamBuffer()
+                        messages.removeAll { it.id in runMessageIds }
+                        runMessageIds.clear()
+                        receivedAuthoritativeMessage = false
+                        receivedVoiceDelta = false
+                        subAgentActivity.value = SubAgentActivityState()
+                        runState.value = RunState.STREAMING
+                        subscribeToEvents(run.id)
+                        return
+                    }
+                    else -> throw InvalidResponse
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (!owns(generation)) return
+                lastFailure = e
+                if (!isRecoverable(e)) break
+            }
+        }
+        if (owns(generation)) showRecoveryError(lastFailure)
+    }
+
+    /** A retained final replaces the run's provisional rows, never the earlier conversation. */
+    @Suppress("UNCHECKED_CAST")
+    private fun applyAuthoritativeOutput(output: Map<String, Any?>): Boolean {
+        val raw = (output["final_messages"] ?: output["finalMessages"]) as? List<Map<String, Any?>> ?: return false
+        val decoder = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+        val finals = raw.map { decoder.decodeFromString<APIMessage>(org.json.JSONObject(it).toString()) }
+        val pending = pendingStore.load()
+        val baseline = pending?.baseline.orEmpty()
+        // Legacy snapshots can include input history. Remove only verified ordered overlap
+        // that includes a user turn; repeated assistant text is NOT a deduplication identity.
+        val baselineOverlap = (minOf(baseline.size, finals.size) downTo 1).firstOrNull { size ->
+            val prefix = finals.take(size)
+            prefix.any { it.role == "user" } && baseline.takeLast(size).zip(prefix).all { (old, final) ->
+                old.role == final.role && old.content == final.content.orEmpty()
+            }
+        } ?: 0
+        // A legacy retained snapshot may contain MORE input history than our recent
+        // UI page. The exact submitted user turn is a boundary, not a text hash:
+        // never append old assistant turns from before that input to the live tail.
+        val submitted = pending?.requestBody?.let { body ->
+            runCatching { org.json.JSONObject(body).optJSONArray("messages") }.getOrNull()
+        }
+        val latestUser = submitted?.let { array ->
+            (array.length() - 1 downTo 0).firstNotNullOfOrNull { index ->
+                array.optJSONObject(index)?.takeIf { it.optString("role") == "user" }?.optString("content")
+            }
+        }
+        val inputBoundary = if (latestUser != null) finals.indexOfLast {
+            it.role == "user" && it.content == latestUser
+        } + 1 else 0
+        val overlap = maxOf(baselineOverlap, inputBoundary)
+        resetStreamBuffer()
+        currentStreamingMessageId = null
+        messages.removeAll { it.id in runMessageIds }
+        runMessageIds.clear()
+        val existing = messages.map { it.id }.toMutableSet()
+        finals.drop(overlap).filterNot { it.role == "user" }.forEachIndexed { index, message ->
+            mapApiMessage(message.copy(id = message.id ?: "${currentRunId}-final-$index")).forEach { mapped ->
+                if (existing.add(mapped.id)) {
+                    messages.add(mapped)
+                    runMessageIds.add(mapped.id)
+                }
+            }
+        }
+        turnFinalized = true
+        receivedAuthoritativeMessage = true
+        firstAssistantMessageFired = messages.any { it.role == MessageRole.ASSISTANT }
+        return true
+    }
+
     // -- SSE Event Handling --
 
     private suspend fun subscribeToEvents(runId: String) {
@@ -1001,16 +1338,15 @@ class ChatViewModel(
         // surface `EXPLICIT`; the host can disambiguate "user
         // cancelled" from "new run started" by tracking the runId
         // they passed to `cancelRun`.
-        sseClient?.disconnect(DisconnectReason.EXPLICIT)
+        val previous = sseClient
+        sseClient = null
+        previous?.disconnect(DisconnectReason.LIFECYCLE)
+        val generation = operationGeneration
 
         val eventPath = config.apiPaths.runEventsUrl(runId)
-        var urlString = "${config.backendUrl}$eventPath"
-
-        val token = try { apiClient.getOrCreateSession() } catch (_: Exception) { null }
-        if (token != null) {
-            val encoded = URLEncoder.encode(token, "UTF-8")
-            urlString += "?anonymous_token=$encoded"
-        }
+        val urlString = "${config.backendUrl}$eventPath"
+        val token = apiClient.getOrCreateSession()
+        if (!owns(generation) || !foreground) return
 
         assistantContent = ""
         resetStreamBuffer()
@@ -1018,8 +1354,9 @@ class ChatViewModel(
         turnFinalized = false
         clearPendingEcho()
 
-        val client = SSEClient()
+        val client = sseFactory()
         sseClient = client
+        lastEventSeq = null
 
         // Single-shot completion gate. Resolved by `onComplete`,
         // `onError`, or `cancelRun` — whichever fires first. The await
@@ -1027,15 +1364,19 @@ class ChatViewModel(
         val completion = CompletableDeferred<Unit>()
         streamCompletion = completion
 
-        client.onEvent = { event -> handleSSEEvent(event) }
+        client.onEvent = { event ->
+            if (owns(generation) && sseClient === client && currentRunId == runId) handleSSEEvent(event)
+        }
         client.onError = { e ->
-            isLoading.value = false
-            error.value = e.message
-            resolveStreamCompletion()
+            if (owns(generation) && sseClient === client) {
+                sseClient = null
+                if (streamCompletion === completion) streamCompletion = null
+                completion.completeExceptionally(e)
+            }
         }
         client.onComplete = {
-            isLoading.value = false
-            resolveStreamCompletion()
+            // This callback only reports teardown. It is NEVER run success.
+            if (owns(generation) && sseClient === client) resolveStreamCompletion()
         }
 
         // Forward the host-configured onDisconnect through the SSE
@@ -1044,15 +1385,21 @@ class ChatViewModel(
         // in response — it just signals.
         val onDisconnect = config.onDisconnect
         client.onDisconnect = { disconnectedRunId, reason ->
-            onDisconnect?.invoke(disconnectedRunId, reason)
+            if (owns(generation)) onDisconnect?.invoke(disconnectedRunId, reason)
         }
 
-        client.connect(urlString, apiClient.authHeaders(), runId)
+        client.connect(urlString, apiClient.authHeaders(token), runId)
 
-        // Suspend until terminal state. Safe under structured concurrency:
-        // if the parent coroutine is cancelled, the await throws and the
-        // outer try/finally in [sendMessageAndAwait] handles cleanup.
-        completion.await()
+        try {
+            completion.await()
+        } finally {
+            // Awaiter cancellation must not leave an independently-owned SSE call alive.
+            if (sseClient === client) {
+                sseClient = null
+                client.disconnect(DisconnectReason.LIFECYCLE)
+            }
+            if (streamCompletion === completion) streamCompletion = null
+        }
     }
 
     /** Single-shot resume of the in-flight stream awaiter. Safe to call
@@ -1066,10 +1413,20 @@ class ChatViewModel(
 
     @Suppress("UNCHECKED_CAST")
     private fun handleSSEEvent(event: SSEEvent) {
-        val json = event.json() ?: return
-        val payload = json["payload"] as? Map<String, Any?> ?: return
+        val generation = operationGeneration
+        val json = event.json() ?: throw SSEFailure.Malformed
+        val payload = json["payload"] as? Map<String, Any?> ?: throw SSEFailure.Malformed
+        val eventRun = json["run_id"] as? String ?: json["runId"] as? String
+        if (eventRun != null && eventRun != currentRunId) return
+        val seq = (json["seq"] as? Number)?.toLong() ?: event.id?.toLongOrNull()
+        if (seq != null) {
+            if (lastEventSeq?.let { seq <= it } == true) return
+            lastEventSeq = seq
+        }
+        val before = messages.map { it.id }.toSet()
 
-        config.onEvent?.invoke(event.type, payload)
+        if (!reconstructing) config.onEvent?.invoke(event.type, payload)
+        if (!owns(generation)) return
         runState.value = runState.value.apply(event.type)
 
         when (event.type) {
@@ -1086,6 +1443,7 @@ class ChatViewModel(
             "client.action.required", "run.suspended" -> handleRequiredAction(payload)
             "run.succeeded", "run.failed", "run.cancelled", "run.timed_out" -> handleTerminalEvent(event.type, payload)
         }
+        runMessageIds.addAll(messages.map { it.id }.filterNot { it in before })
     }
 
     private fun handleAssistantDelta(payload: Map<String, Any?>) {
@@ -1128,10 +1486,14 @@ class ChatViewModel(
             }
             pendingEchoBuffer = StringBuilder()
             if (replay.isEmpty()) return
+            receivedAuthoritativeMessage = false
             assistantContent = ""
             resetStreamBuffer()
             streamBuffer.append(replay)
-            voiceController?.pushDelta(replay, emotion)
+            if (!reconstructing) {
+                receivedVoiceDelta = true
+                voiceController?.pushDelta(replay, emotion)
+            }
             startDrainTimerIfNeeded()
             return
         }
@@ -1151,12 +1513,16 @@ class ChatViewModel(
             || drainJob != null
             || streamBuffer.isNotEmpty()
         if (!hasActiveSession) {
+            receivedAuthoritativeMessage = false
             assistantContent = ""
             resetStreamBuffer()
         }
 
         streamBuffer.append(delta)
-        voiceController?.pushDelta(delta, emotion)
+        if (!reconstructing) {
+            receivedVoiceDelta = true
+            voiceController?.pushDelta(delta, emotion)
+        }
         startDrainTimerIfNeeded()
     }
 
@@ -1178,6 +1544,7 @@ class ChatViewModel(
             subAgentActivity.value = subAgentActivity.value.settingFinal(content)
             return
         }
+        receivedAuthoritativeMessage = true
 
         // Unconditionally mark the turn finalised — the server's "this turn
         // is done" signal. Any `assistant.delta` that arrives later must be
@@ -1189,9 +1556,8 @@ class ChatViewModel(
         // fragment. If it didn't (non-streaming run), pass `content` so
         // the user still hears the reply.
         val voiceEmotion = Emotion.from(payload["emotion"])
-        val needsFallbackText = streamBuffer.isEmpty() && drainJob == null
-        voiceController?.finishTurn(
-            finalText = if (needsFallbackText) content else null,
+        if (!reconstructing) voiceController?.finishTurn(
+            finalText = if (!receivedVoiceDelta) content else null,
             emotion = voiceEmotion,
         )
 
@@ -1201,12 +1567,13 @@ class ChatViewModel(
         val reference = pendingEchoReference
         if (reference != null) {
             clearPendingEcho()
-            if (content == reference || reference.startsWith(content)) {
+            if (content == reference) {
                 return
             }
             if (content.startsWith(reference)) {
                 val suffix = content.substring(reference.length)
                 if (suffix.isEmpty()) return
+                resetStreamBuffer()
                 assistantContent = suffix
                 upsertStreamingMessage(assistantContent)
                 closeStreamingSession()
@@ -1216,13 +1583,8 @@ class ChatViewModel(
             // Parent said something genuinely different — fall through.
         }
 
-        // If deltas are still draining, the same content is already queued
-        // in streamBuffer; snapping here would produce a visible leap to
-        // the end. Let the drain finish smoothly.
-        if (drainJob != null || streamBuffer.isNotEmpty()) {
-            return
-        }
-
+        // The final is authoritative even if deltas are missing or still buffered.
+        resetStreamBuffer()
         assistantContent = content
         upsertStreamingMessage(assistantContent)
         closeStreamingSession()
@@ -1251,7 +1613,8 @@ class ChatViewModel(
             ))
             // Lifecycle hook: first assistant bubble in this
             // conversation. Latch so it only fires once per conv.
-            if (!firstAssistantMessageFired) {
+            runMessageIds.add(newId)
+            if (!reconstructing && !firstAssistantMessageFired) {
                 firstAssistantMessageFired = true
                 config.onFirstAssistantMessage?.invoke(newId)
             }
@@ -1283,6 +1646,7 @@ class ChatViewModel(
     }
 
     private fun handleToolCall(payload: Map<String, Any?>) {
+        receivedAuthoritativeMessage = false
         val name = payload["name"] as? String ?: payload["tool_name"] as? String ?: "tool"
 
         // Pill mode: tool calls from inside a sub-agent bracket are part of
@@ -1482,12 +1846,13 @@ class ChatViewModel(
         val title = action["title"] as? String ?: "Action required"
         val message = action["message"] as? String ?: "Please complete the requested action to continue."
         val actionId = action["action_id"] as? String
-        val alreadyRendered = actionId != null && messages.any {
-            it.type == MessageType.REQUIRED_ACTION && it.metadata?.actionId == actionId
+        val rowId = "required-action-${currentRunId ?: "local"}-${actionId ?: "waiting"}"
+        val alreadyRendered = messages.any {
+            it.id == rowId || (actionId != null && it.type == MessageType.REQUIRED_ACTION && it.metadata?.actionId == actionId)
         }
         if (!alreadyRendered) {
             messages.add(Message(
-                id = "required-action-${System.currentTimeMillis()}",
+                id = rowId,
                 role = MessageRole.SYSTEM,
                 content = message,
                 type = MessageType.REQUIRED_ACTION,
@@ -1499,6 +1864,7 @@ class ChatViewModel(
                     resumeHint = action["resume_hint"]
                 )
             ))
+            runMessageIds.add(rowId)
         }
 
         isLoading.value = false
@@ -1506,9 +1872,9 @@ class ChatViewModel(
         // The run continues server-side; we're dropping the socket
         // because the user is no longer actively watching. This is a
         // LIFECYCLE teardown from the backend's perspective.
-        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
+        val previous = sseClient
         sseClient = null
-        currentRunId = null
+        previous?.disconnect(DisconnectReason.LIFECYCLE)
         runState.value = RunState.WAITING
         resolveStreamCompletion()
         persistToLocalHistory()
@@ -1566,7 +1932,24 @@ class ChatViewModel(
     }
 
     private fun handleTerminalEvent(type: String, payload: Map<String, Any?>) {
-        if (type == "run.failed") {
+        val completedKey = pendingStore.load()?.takeIf { it.runId == currentRunId }?.key
+        @Suppress("UNCHECKED_CAST")
+        val output = payload["output"] as? Map<String, Any?>
+        val repaired = output?.let { applyAuthoritativeOutput(it) } ?: false
+        if (type == "run.succeeded" && !repaired && !receivedAuthoritativeMessage) {
+            // Success without an authoritative message cannot certify partial deltas.
+            val previous = sseClient
+            sseClient = null
+            previous?.disconnect(DisconnectReason.LIFECYCLE)
+            val completion = streamCompletion
+            streamCompletion = null
+            runState.value = RunState.STREAMING
+            completion?.completeExceptionally(SSEFailure.UnexpectedEof)
+            return
+        }
+        closeStreamingSession()
+        runState.value = runState.value.apply(type)
+        if (type == "run.failed" || type == "run.timed_out") {
             // Close the stream so the error doesn't orphan a streaming bubble
             // or let subsequent text overwrite it.
             closeStreamingSession()
@@ -1574,7 +1957,7 @@ class ChatViewModel(
             // Cancel any in-flight TTS — the user shouldn't hear a half
             // sentence after the failure banner appears.
             voiceController?.stop()
-            val errMsg = payload["error"] as? String ?: "Agent run failed"
+            val errMsg = payload["error"] as? String ?: if (type == "run.timed_out") "Agent run timed out" else "Agent run failed"
             error.value = errMsg
             messages.add(Message(
                 id = "error-${System.currentTimeMillis()}",
@@ -1583,9 +1966,7 @@ class ChatViewModel(
                 type = MessageType.ERROR
             ))
         } else {
-            // Success / cancelled / timed-out: let the drain timer finish
-            // smoothly at its elevated rate; flushing would produce a
-            // visible leap. The timer self-cancels when the buffer empties.
+            // Text was flushed above; speech keeps its independent pacing.
             streamingDone = true
             clearPendingEcho()
             if (type == "run.cancelled" || type == "run.timed_out") {
@@ -1594,7 +1975,7 @@ class ChatViewModel(
                 // Success: flush any trailing text the chunker still
                 // holds so the final fragment gets spoken. No-op when
                 // assistant.message already flushed.
-                voiceController?.finishTurn()
+                if (!reconstructing) voiceController?.finishTurn()
             }
         }
 
@@ -1607,12 +1988,21 @@ class ChatViewModel(
         // from "the server finished" can track which runId they
         // passed to `cancelRun` and ignore the callback for
         // unrecognised ids.
-        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
+        val previous = sseClient
         sseClient = null
+        previous?.disconnect(DisconnectReason.LIFECYCLE)
         currentRunId = null
 
-        // Persist to local history store (ephemeral mode)
-        persistToLocalHistory()
+        try {
+            // Clear only this send, and only after the local ephemeral transcript is safe.
+            persistToLocalHistory()
+            completedKey?.let { pendingStore.clear(it) }
+        } catch (_: Exception) {
+            error.value = "Reply received, but local saving failed. Reopen the app to recover it."
+        } finally {
+            // The transport was detached above: a storage failure must not orphan its awaiter.
+            resolveStreamCompletion()
+        }
     }
 
     /** Save the current conversation to the local history store. */
@@ -1667,43 +2057,16 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * Move a slice of buffered chars into the visible message. Rate is
-     * adaptive: large buffers drain faster so long responses don't lag
-     * far behind the server. A short word-boundary lookahead lets short
-     * words land as a unit instead of being cut into 2-char pulses,
-     * which reads as much smoother at the same effective char-per-second
-     * rate.
-     *
-     * @return false if the drain is complete and the loop should exit.
-     */
+    /** Display all available text at the UI cadence; false when the loop can stop. */
     private fun drainTick(): Boolean {
         if (streamBuffer.isEmpty()) {
             drainJob = null
             streamingDone = false
             return false
         }
-        val pending = streamBuffer.length
-        val cap = if (streamingDone) 6 else 2
-        var take = maxOf(1, minOf(pending / 120, cap))
-
-        // Word-boundary preference: if the slice would end mid-word,
-        // look ahead a few chars and extend through the next whitespace
-        // so the word lands whole. Long words (no space within the
-        // lookahead window) still reveal at the base rate, preserving
-        // the typewriter feel for them.
-        if (take < pending && !streamBuffer[take - 1].isWhitespace()) {
-            val lookahead = minOf(pending - take, 5)
-            for (offset in 0 until lookahead) {
-                if (streamBuffer[take + offset].isWhitespace()) {
-                    take += offset + 1
-                    break
-                }
-            }
-        }
-
-        val slice = streamBuffer.substring(0, take)
-        streamBuffer.delete(0, take)
+        // Batch everything received at the UI cadence; speech has its own pacing.
+        val slice = streamBuffer.toString()
+        streamBuffer.clear()
         assistantContent += slice
         upsertStreamingMessage(assistantContent)
         return true
@@ -1754,6 +2117,13 @@ class ChatViewModel(
     // -- Message Mapping --
 
     private fun mapApiMessage(m: APIMessage): List<Message> {
+        val identity = m.id ?: m.seq?.let { "seq-$it" }
+        return mapApiMessageRows(m).mapIndexed { index, row ->
+            row.copy(id = identity?.let { if (index == 0) it else "$it-part-$index" } ?: row.id, seq = m.seq)
+        }
+    }
+
+    private fun mapApiMessageRows(m: APIMessage): List<Message> {
         val timestamp = Date() // Simplified — could parse m.timestamp
 
         // Tool result messages (role: "tool"). If the backend persisted
@@ -1832,7 +2202,7 @@ class ChatViewModel(
      */
     override fun onCleared() {
         super.onCleared()
-        sseClient?.disconnect(DisconnectReason.LIFECYCLE)
+        onBackground()
     }
 }
 

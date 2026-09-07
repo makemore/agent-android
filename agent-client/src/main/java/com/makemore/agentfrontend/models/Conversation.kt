@@ -1,18 +1,21 @@
 package com.makemore.agentfrontend.models
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonNames
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 /**
  * A conversation containing messages.
  * Mirrors the iOS Conversation struct.
  */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class Conversation(
     val id: String,
     val title: String? = null,
     val messages: List<APIMessage>? = null,
-    val hasMore: Boolean? = null,
+    @JsonNames("has_more") val hasMore: Boolean? = null,
     val createdAt: String? = null,
     val updatedAt: String? = null,
     /**
@@ -23,17 +26,21 @@ data class Conversation(
      * without re-running an LLM call.
      */
     val metadata: JsonObject? = null,
+    @JsonNames("next_before_seq") val nextBeforeSeq: Int? = null,
 )
 
 /** API message format (for decoding from backend) */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class APIMessage(
     val role: String,
     val content: String? = null,
     val timestamp: String? = null,
-    val toolCalls: List<ToolCall>? = null,
-    val toolCallId: String? = null,
-    val metadata: APIMessageMetadata? = null
+    @JsonNames("tool_calls") val toolCalls: List<ToolCall>? = null,
+    @JsonNames("tool_call_id") val toolCallId: String? = null,
+    val metadata: APIMessageMetadata? = null,
+    val id: String? = null,
+    val seq: Long? = null,
 )
 
 /**
@@ -68,10 +75,14 @@ data class ToolFunction(
 )
 
 /** Agent run response */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class AgentRun(
     val id: String,
-    val conversationId: String? = null
+    @JsonNames("conversation_id") val conversationId: String? = null,
+    val status: String? = null,
+    val output: JsonObject? = null,
+    val error: JsonElement? = null,
 )
 
 /** Conversation list response */

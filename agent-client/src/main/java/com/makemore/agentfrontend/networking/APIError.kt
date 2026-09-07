@@ -9,6 +9,7 @@ sealed class APIError(message: String, cause: Throwable? = null) : Exception(mes
 object InvalidResponse : APIError("Invalid response from server")
 object Unauthorized : APIError("Unauthorized - please check your credentials")
 object NotFound : APIError("Resource not found")
+object RunExpired : APIError("This reply has expired or was deleted and is no longer available")
 data class HttpError(val statusCode: Int) : APIError("HTTP error: $statusCode")
 data class ServerError(override val message: String) : APIError(message)
 object SessionCreationFailed : APIError("Failed to create session")

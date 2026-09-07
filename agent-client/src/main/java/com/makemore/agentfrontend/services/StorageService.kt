@@ -10,6 +10,10 @@ import android.content.SharedPreferences
 interface StorageService {
     fun get(key: String): String?
     fun set(key: String, value: String?)
+    /** Must not return until the write is durable. Unknown implementations fail closed. */
+    fun setDurably(key: String, value: String?) {
+        throw IllegalStateException("Durable storage is required before sending")
+    }
 }
 
 /**
@@ -47,6 +51,8 @@ class InMemoryStorage : StorageService {
     private val storage = mutableMapOf<String, String>()
 
     override fun get(key: String): String? = storage[key]
+
+    override fun setDurably(key: String, value: String?) = set(key, value)
 
     override fun set(key: String, value: String?) {
         if (value != null) {

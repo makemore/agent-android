@@ -62,7 +62,7 @@ class SSEClientDisconnectTest {
         // Server stays open but never sends a body. We connect, then
         // explicitly disconnect with reason EXPLICIT. The callback
         // must fire once with the supplied runId.
-        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.KEEP_OPEN))
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
         val url = server.url("/stream").toString()
         val client = newClient()
         client.connect(url, emptyMap(), runId = "run-explicit")
@@ -83,7 +83,7 @@ class SSEClientDisconnectTest {
         // onDisconnect (we have no runId to report). Mirrors the
         // production contract: connect(url, headers, runId) is
         // required for the callback to be meaningful.
-        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.KEEP_OPEN))
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
         val url = server.url("/stream").toString()
         val client = newClient()
         client.connect(url, emptyMap(), runId = null)
@@ -130,7 +130,7 @@ class SSEClientDisconnectTest {
 
     @Test
     fun repeatedDisconnectFiresOnDisconnectOnlyOnce() = runTest {
-        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.KEEP_OPEN))
+        server.enqueue(MockResponse().setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE))
         val url = server.url("/stream").toString()
         val client = newClient()
         client.connect(url, emptyMap(), runId = "run-once")

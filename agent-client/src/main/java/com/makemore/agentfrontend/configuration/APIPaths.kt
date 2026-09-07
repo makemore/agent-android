@@ -60,6 +60,17 @@ data class APIPaths(
     fun runEventsUrl(runId: String): String =
         runEvents.replace("{runId}", runId)
 
+    fun runDetailUrl(runId: String): String = "$runs$runId/"
+
+    fun runByIdempotencyKeyUrl(key: String): String =
+        "${runs}by-idempotency-key/?idempotency_key=${java.net.URLEncoder.encode(key, "UTF-8")}"
+
+    fun conversationPageUrl(id: String, limit: Int = 50, offset: Int = 0, beforeSeq: Int? = null): String {
+        require(limit in 1..50 && offset >= 0 && (beforeSeq == null || beforeSeq >= 0))
+        return "$conversations$id/?limit=$limit" +
+            (beforeSeq?.let { "&before_seq=$it" } ?: "&offset=$offset")
+    }
+
     /** Get the cancel run URL with the run ID substituted */
     fun cancelRunUrl(runId: String): String =
         cancelRun?.replace("{runId}", runId) ?: "${runs}${runId}/cancel/"

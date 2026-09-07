@@ -138,6 +138,8 @@ data class ChatWidgetConfig(
     val authStrategy: AuthStrategy? = null,
     /** Authentication token */
     val authToken: String? = null,
+    /** Stable non-secret account identity for recovery across credential refreshes. */
+    val recoveryAccountId: String? = null,
     /** Custom auth header name */
     val authHeader: String? = null,
     /** Custom auth token prefix */

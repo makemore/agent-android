@@ -154,7 +154,7 @@ class LocalHistoryStore(
                        title = excluded.title,
                        updated_at = excluded.updated_at,
                        message_count = excluded.message_count""",
-                arrayOf(
+                arrayOf<Any>(
                     conversation.id, agentKey, conversation.title,
                     conversation.createdAt, conversation.updatedAt,
                     conversation.messages.size

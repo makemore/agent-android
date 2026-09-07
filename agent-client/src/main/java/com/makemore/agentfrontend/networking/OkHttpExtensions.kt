@@ -20,7 +20,7 @@ suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
         }
 
         override fun onResponse(call: Call, response: Response) {
-            if (cont.isActive) cont.resume(response)
+            cont.resume(response, onCancellation = { _, abandoned, _ -> abandoned.close() })
         }
     })
 }
