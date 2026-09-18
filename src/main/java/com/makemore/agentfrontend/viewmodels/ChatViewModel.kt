@@ -1645,9 +1645,15 @@ class ChatViewModel(
         turnFinalized = false
     }
 
+    /** Built-in memory bookkeeping is not a reply boundary or visible activity. */
+    private fun isMemoryTool(name: String?): Boolean =
+        name == "remember" || name == "recall" || name == "forget"
+
     private fun handleToolCall(payload: Map<String, Any?>) {
-        receivedAuthoritativeMessage = false
         val name = payload["name"] as? String ?: payload["tool_name"] as? String ?: "tool"
+        // Keep the reply, voice and pending echo intact until the authoritative final.
+        if (isMemoryTool(name)) return
+        receivedAuthoritativeMessage = false
 
         // Pill mode: tool calls from inside a sub-agent bracket are part of
         // the same "thinking" activity and shouldn't show as a bubble.
@@ -1675,6 +1681,9 @@ class ChatViewModel(
 
     @Suppress("UNCHECKED_CAST")
     private fun handleToolResult(payload: Map<String, Any?>) {
+        val name = payload["name"] as? String ?: payload["tool_name"] as? String
+        if (isMemoryTool(name)) return
+
         // Pill mode: silently absorb tool results that arrive inside a
         // sub-agent bracket — the activity pill already reflects the tool
         // call, and we don't want a "✓ Done" row in the history for work
@@ -1694,7 +1703,7 @@ class ChatViewModel(
             content = content,
             type = MessageType.TOOL_RESULT,
             metadata = MessageMetadata(
-                toolName = payload["name"] as? String ?: payload["tool_name"] as? String,
+                toolName = name,
                 toolCallId = payload["tool_call_id"] as? String ?: payload["id"] as? String,
                 result = result
             )
@@ -2164,7 +2173,12 @@ class ChatViewModel(
         // Assistant messages with tool calls
         val toolCalls = m.toolCalls
         if (m.role == "assistant" && !toolCalls.isNullOrEmpty()) {
-            return toolCalls.map { tc ->
+            val rows = mutableListOf<Message>()
+            val content = m.content
+            if (!content.isNullOrEmpty()) {
+                rows.add(Message(role = MessageRole.ASSISTANT, content = content, timestamp = timestamp))
+            }
+            rows += toolCalls.map { tc ->
                 val name = tc.function?.name ?: tc.name ?: "tool"
                 Message(
                     role = MessageRole.ASSISTANT,
@@ -2178,6 +2192,7 @@ class ChatViewModel(
                     )
                 )
             }
+            return rows
         }
 
         // Skip empty assistant messages

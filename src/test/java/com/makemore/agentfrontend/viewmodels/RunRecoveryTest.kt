@@ -1,6 +1,7 @@
 package com.makemore.agentfrontend.viewmodels
 
 import com.makemore.agentfrontend.configuration.AuthStrategy
+import com.makemore.agentfrontend.configuration.ChatAppearance
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.models.*
 import com.makemore.agentfrontend.networking.*
@@ -155,6 +156,117 @@ class RunRecoveryTest {
         handle.invoke(vm, SSEEvent("assistant.message", """{"payload":{"content":"Complete answer"}}"""))
         assertEquals("Complete answer", vm.messages.single().content)
         assertFalse(vm.messages.single().isStreaming)
+    }
+
+    @Test fun memoryTailThenAuthoritativeFinalKeepsOneReply() = runBlocking(main) {
+        for (name in listOf("remember", "recall", "forget")) {
+            for (renderFirst in listOf(false, true)) {
+                assertMemoryReply(name, delta = "Your summary", renderFirst = renderFirst)
+            }
+        }
+    }
+
+    @Test fun nonStreamingMemoryTailDoesNotLoseReply() = runBlocking(main) {
+        for (name in listOf("remember", "recall", "forget")) assertMemoryReply(name, delta = null)
+    }
+
+    @Test fun memoryThenContinuationStaysInOneReply() = runBlocking(main) {
+        for (name in listOf("remember", "recall", "forget")) {
+            assertMemoryReply(name, delta = "Your summary", continuation = " continues", renderFirst = true)
+        }
+    }
+
+    private fun assertMemoryReply(name: String, delta: String?, continuation: String = "", renderFirst: Boolean = false) {
+        val toolEvents = mutableListOf<String>()
+        val vm = vm(config.copy(onEvent = { type, _ -> if (type.startsWith("tool.")) toolEvents.add(type) })) {
+            error("No HTTP expected")
+        }
+        if (delta != null) dispatch(vm, "assistant.delta", """{"delta":"$delta"}""")
+        if (renderFirst) {
+            ChatViewModel::class.java.getDeclaredMethod("flushStreamBuffer").apply { isAccessible = true }.invoke(vm)
+        }
+        val originalId = vm.messages.firstOrNull()?.id
+        dispatchMemory(vm, name)
+        if (continuation.isNotEmpty()) dispatch(vm, "assistant.delta", """{"delta":"$continuation"}""")
+        val expected = "Your summary$continuation"
+        dispatch(vm, "assistant.message", """{"content":"$expected"}""")
+        assertEquals(name, listOf(expected), vm.messages.map { it.content })
+        assertFalse(vm.messages.single().isStreaming)
+        if (originalId != null) assertEquals(originalId, vm.messages.single().id)
+        assertEquals(listOf("tool.call", "tool.result"), toolEvents)
+        val voiceDelta = ChatViewModel::class.java.getDeclaredField("receivedVoiceDelta").apply { isAccessible = true }
+        assertEquals("Memory must preserve the voice delta state", delta != null, voiceDelta.getBoolean(vm))
+    }
+
+    @Test fun publicToolStillStartsNewBubble() = runBlocking(main) {
+        // Exact built-in matching: a memory-like public name is still a boundary.
+        for (name in listOf("get_exercise_detail", "remember_summary")) {
+            val vm = vm { error("No HTTP expected") }
+            dispatch(vm, "assistant.delta", """{"delta":"Before tool"}""")
+            dispatch(vm, "tool.call", """{"name":"$name"}""")
+            dispatch(vm, "tool.result", """{"name":"$name","result":{"ok":true}}""")
+            dispatch(vm, "assistant.delta", """{"delta":"After tool"}""")
+            dispatch(vm, "assistant.message", """{"content":"After tool"}""")
+            assertEquals(listOf(MessageType.MESSAGE, MessageType.TOOL_CALL, MessageType.TOOL_RESULT, MessageType.MESSAGE),
+                vm.messages.map { it.type })
+            assertEquals(listOf("Before tool", "After tool"),
+                vm.messages.filter { it.type == MessageType.MESSAGE }.map { it.content })
+            assertTrue(vm.messages.none { it.isStreaming })
+        }
+    }
+
+    @Test fun memoryTailPreservesPendingSubAgentEcho() = runBlocking(main) {
+        val vm = vm(config.copy(appearance = ChatAppearance.classic())) { error("No HTTP expected") }
+        dispatch(vm, "sub_agent.start", """{"agent_name":"Coach"}""")
+        dispatch(vm, "assistant.message", """{"content":"Your summary"}""")
+        dispatch(vm, "sub_agent.end", """{"agent_name":"Coach"}""")
+        dispatch(vm, "assistant.delta", """{"delta":"Your summary"}""")
+        dispatchMemory(vm, "remember")
+        dispatch(vm, "assistant.message", """{"content":"Your summary"}""")
+        assertEquals(listOf("Your summary"), vm.messages.filter { it.type == MessageType.MESSAGE }.map { it.content })
+    }
+
+    @Test fun memoryBookkeepingDoesNotAppearInActivityPill() = runBlocking(main) {
+        val vm = vm { error("No HTTP expected") }
+        dispatch(vm, "sub_agent.start", """{"agent_name":"Coach"}""")
+        for (name in listOf("remember", "recall", "forget")) {
+            dispatchMemory(vm, name)
+            assertTrue(vm.subAgentActivity.value.isActive)
+            assertNull(vm.subAgentActivity.value.topFrame?.currentToolName)
+        }
+        assertTrue(vm.messages.isEmpty())
+    }
+
+    @Test fun historyRetainsAssistantTextAlongsideToolCalls() = runBlocking(main) {
+        val vm = vm { error("No HTTP expected") }
+        val map = ChatViewModel::class.java.getDeclaredMethod("mapApiMessage", APIMessage::class.java).apply { isAccessible = true }
+        val calls = listOf(ToolCall(id = "memory", function = ToolFunction(name = "remember", arguments = "{}")),
+            ToolCall(id = "public", name = "lookup", arguments = "{}"))
+        val message = APIMessage(id = "summary", seq = 42L, role = "assistant", content = "Your summary", toolCalls = calls)
+        val rows = (map.invoke(vm, message) as List<*>).filterIsInstance<Message>()
+        assertEquals(listOf(MessageType.MESSAGE, MessageType.TOOL_CALL, MessageType.TOOL_CALL), rows.map { it.type })
+        assertEquals("Your summary", rows.first().content)
+        assertEquals(MessageRole.ASSISTANT, rows.first().role)
+        assertEquals("summary", rows.first().id)
+        assertEquals(listOf("remember", "lookup"), rows.drop(1).map { it.metadata?.toolName })
+        assertEquals(listOf("memory", "public"), rows.drop(1).map { it.metadata?.toolCallId })
+        assertEquals(listOf("{}", "{}"), rows.drop(1).map { it.metadata?.arguments })
+        assertEquals(rows.size, rows.map { it.id }.toSet().size)
+        assertTrue(rows.all { it.seq == 42L })
+        for (content in listOf(null, "")) {
+            val emptyRows = (map.invoke(vm, message.copy(content = content)) as List<*>).filterIsInstance<Message>()
+            assertEquals(listOf(MessageType.TOOL_CALL, MessageType.TOOL_CALL), emptyRows.map { it.type })
+        }
+    }
+
+    private fun dispatch(vm: ChatViewModel, type: String, payload: String) {
+        val handle = ChatViewModel::class.java.getDeclaredMethod("handleSSEEvent", SSEEvent::class.java).apply { isAccessible = true }
+        handle.invoke(vm, SSEEvent(type, """{"payload":$payload}"""))
+    }
+
+    private fun dispatchMemory(vm: ChatViewModel, name: String) {
+        dispatch(vm, "tool.call", """{"name":"$name","id":"memory","arguments":{}}""")
+        dispatch(vm, "tool.result", """{"name":"$name","tool_call_id":"memory","result":{"ok":true}}""")
     }
 
     @Test fun coldRecoveryKeepsIntegerCursorAndMergesEarlierRowsWithoutDroppingLiveRows() = runBlocking(main) {
