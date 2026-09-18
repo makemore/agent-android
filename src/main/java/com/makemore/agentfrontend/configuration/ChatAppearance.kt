@@ -283,40 +283,38 @@ data class ChatAppearance(
          *  the warm-dark anthropic look. Intentional departures:
          *
          *  - Accent is the RM brand gold (`#D8A762`) instead of Claude
-         *    coral, and `textOnAccent` is black rather than white: gold
-         *    is a light accent, white on it measures ~2.2:1 (fails WCAG),
-         *    so on-gold chrome takes black instead.
+         *    coral, and `textOnAccent` is the warm black rather than white:
+         *    gold is a light accent, white on it measures ~2.2:1 (fails
+         *    WCAG), so on-gold chrome takes the dark instead.
          *  - The transcript is asymmetric on purpose: user turns are
          *    grey bubbles with white text ([userBubbleText] carries
          *    white independently of [textOnAccent]), and assistant
          *    replies are [AssistantMessageStyle.PLAIN] serif prose on
          *    the background — the agent reads as the page, not as a
          *    second participant.
-         *  - One black in the app: the background is a true near-black
-         *    ground (`#0C0C0A`, warm-biased like `#262624` but far
-         *    darker) and raised surfaces are translucent white ON it,
-         *    so elevation reads as light rather than a different grey.
+         *  - The warm near-black trio, as on iOS: `#262624` ground,
+         *    `#2F2F2D` surface, `#3A3A37` elevated. (Android spent
+         *    2026-08-26 to 2026-09-14 on a true near-black `#0C0C0A` with
+         *    translucent-white surfaces; side by side with the iPhone it
+         *    read as a different app, so it matches iOS again.)
          *  - Type sizes are iOS's `.body` in `sp`; `messageLineHeight`
          *    is iOS's 17pt body plus its 6pt `lineSpacing` resolved to
          *    a total pitch because Compose has no additive leading.
          *
-         *  Mirrors iOS `ChatAppearance.resilientGold` except where RM's
-         *  Android app already deliberately diverged — notably the
-         *  true-black background and translucent-white surfaces (iOS
-         *  stays on the warm near-black `#262624` trio).
+         *  Mirrors iOS `ChatAppearance.resilientGold`'s colours.
          *
          *  Every token is intentionally explicit so library default
          *  changes cannot alter this preset. */
         fun resilientGold(): ChatAppearance = ChatAppearance(
-            background = Color(0xFF0C0C0A),
-            surface = Color.White.copy(alpha = 0.08f),
-            surfaceElevated = Color.White.copy(alpha = 0.12f),
+            background = Color(0xFF262624),
+            surface = Color(0xFF2F2F2D),
+            surfaceElevated = Color(0xFF3A3A37),
             divider = Color.White.copy(alpha = 0.08f),
             textPrimary = Color(0xFFF5F5F7),
             textSecondary = Color(0xFFA1A1A6),
-            textOnAccent = Color.Black,
+            textOnAccent = Color(0xFF262624),
             accent = Color(0xFFD8A762),
-            userBubble = Color.White.copy(alpha = 0.12f),
+            userBubble = Color(0xFF3A3A37),
             userBubbleText = Color.White,
             assistantBubble = Color(0xFF3A3A37),
             systemBubble = Color(0xFF2F2F2D),

@@ -933,7 +933,7 @@ private fun AnthropicComposer(
         modifier = Modifier
             .fillMaxWidth()
             .background(config.appearance.background)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = 16.dp, vertical = 10.dp),
     ) {
         Column(
             modifier = Modifier

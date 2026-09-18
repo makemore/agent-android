@@ -114,6 +114,10 @@ data class ChatWidgetConfig(
      *  frontend) these events are processed internally but not rendered as
      *  visible messages; hosts that want the verbose thread opt in. */
     val showToolMessages: Boolean = false,
+    /** Show the thin token-usage banner above the message list once the
+     *  runtime has reported `context.usage`. Hosts that don't want users to
+     *  see token counts turn it off. Mirrors iOS `showContextUsage`. */
+    val showContextUsage: Boolean = true,
     /**
      * Follow the assistant's streaming reply by auto-scrolling to the
      * bottom on every token. When `false` the list stays put while the

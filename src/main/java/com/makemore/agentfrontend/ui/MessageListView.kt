@@ -9,7 +9,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -49,12 +56,11 @@ import com.makemore.agentfrontend.models.SubAgentActivityState
  *  * **Opening a conversation** lands on the newest message, without
  *    animating in from the top.
  *  * **Sending a message** pins the list to the bottom.
- *  * **Streaming** follows only while the reader is already at the bottom.
- *    The scroll position itself is the state — there is no latch to get
- *    stuck: scrolling up disengages, scrolling back down re-engages.
- *  * **A jump-to-bottom button** appears once the reader is away from the
- *    newest message, driven by that same derived state, so the button
- *    appearing is exactly the signal that following has stopped.
+ *  * **Streaming** follows only while the reader is at the bottom. Only the
+ *    reader's own drags and flings decide that — scrolling up disengages,
+ *    scrolling back down re-engages — never the content changing height.
+ *  * **A jump-to-bottom button** appears exactly while following is off,
+ *    so the button appearing is the signal that following has stopped.
  */
 
 @Composable
@@ -101,28 +107,37 @@ fun MessageListView(
             } else true
     }
 
-    // Follow state is derived from position, not latched — but it has to be
-    // read against the height the content had BEFORE it grew. `maxValue`
-    // updates as soon as a row gets taller, while `value` does not move, so
-    // comparing the two after growth always reports "not at the bottom" and
-    // following would never engage. `previousMax` is that pre-growth height.
-    var previousMax by remember { mutableIntStateOf(0) }
-
-    // Live position, for the jump button. Once following works this stays
-    // true throughout a stream, so the button does not flicker.
-    val atBottom by remember {
-        derivedStateOf { scrollState.value >= scrollState.maxValue - BOTTOM_SLOP_PX }
+    // Whether the list follows the newest message. Decided by where the
+    // reader's scroll position lands, and only by that: the content changing
+    // height never touches it. The previous version re-derived it on every
+    // height change by comparing `value` against the height before the
+    // change, which a streaming reply defeats — half-arrived markdown (an
+    // unclosed `**`, a bullet that is still just `*`) shrinks a row for a
+    // frame and grows it again, and when both land between two collections
+    // `value` sits below the old height, reads as "scrolled up", and
+    // following drops out until some later shrink happens to clamp `value`
+    // back to the bottom. That is the lag-then-jump seen mid-reply (RM-206).
+    //
+    // Still not a latch that can stick: any drag or fling that ends at the
+    // bottom, or the jump button, turns following back on.
+    var following by remember { mutableStateOf(true) }
+    // Only the reader's own scrolling votes. Drags and flings pass through
+    // nested scroll; the list's programmatic `scrollTo`s do not, so a follow
+    // that lands short because the reply grew meanwhile can't switch
+    // following off.
+    val readerScroll = remember {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                following = scrollState.value >= scrollState.maxValue - BOTTOM_SLOP_PX
+                return Offset.Zero
+            }
+        }
     }
 
     // Landing and following are ONE long-lived collector, not two effects
-    // keyed on `maxValue`. A keyed `LaunchedEffect` is cancelled and
-    // relaunched every time its key changes, and during a stream that is
-    // every frame — so the `scrollTo` in flight gets cancelled before it
-    // lands, `value` falls behind `maxValue`, and the next pass reads that
-    // gap as "the reader scrolled up" and detaches. That is the failure
-    // where following holds for a moment and then drops out mid-reply.
-    // A single collector processes every height change in order and is
-    // never cancelled underneath itself.
+    // keyed on `maxValue`: a keyed `LaunchedEffect` is cancelled and
+    // relaunched on every height change, which during a stream is every
+    // frame, so the scroll in flight never lands.
     var hasLanded by remember { mutableStateOf(false) }
     var prependAnchor by remember { mutableStateOf<HistoryScrollAnchor?>(null) }
     var measuredAnchorY by remember { mutableStateOf<Float?>(null) }
@@ -145,8 +160,6 @@ fun MessageListView(
     LaunchedEffect(Unit) {
         snapshotFlow { scrollState.maxValue }.collect { max ->
             if (max == 0) return@collect
-            val grewFrom = previousMax
-            previousMax = max
 
             // Opening a conversation lands on the newest message. Jumps
             // rather than animates: animating from the top would play the
@@ -157,10 +170,16 @@ fun MessageListView(
                 return@collect
             }
 
-            if (prependAnchor != null) return@collect
-
-            if (scrollState.value < grewFrom - BOTTOM_SLOP_PX) return@collect
-            scrollState.scrollTo(max)
+            if (prependAnchor != null || !following) return@collect
+            try {
+                scrollState.scrollTo(max)
+            } catch (e: CancellationException) {
+                // A finger on the list holds the scroll at a higher priority,
+                // and the loser is refused with a cancellation. Uncaught, that
+                // ends this collector and following for the rest of the
+                // conversation. Only rethrow if the effect itself is going.
+                currentCoroutineContext().ensureActive()
+            }
         }
     }
 
@@ -179,9 +198,9 @@ fun MessageListView(
         // first message of a brand-new conversation) — the open-scroll above
         // already put us at the bottom.
         if (previousTailId == null) return@LaunchedEffect
-        scrollState.scrollTo(scrollState.maxValue)
         // Re-arm following even if the reader had scrolled up before sending.
-        previousMax = scrollState.maxValue
+        following = true
+        scrollState.scrollTo(scrollState.maxValue)
     }
 
     // Resolve once per render: the id of the most recent assistant
@@ -280,6 +299,7 @@ fun MessageListView(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
+                    .nestedScroll(readerScroll)
                     .verticalScroll(scrollState)
                     .padding(vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -324,12 +344,10 @@ fun MessageListView(
                 statusIndicator()
             }
 
-            // Jump-to-bottom, shown only once the reader has scrolled away
-            // from the newest message — the same condition that detaches
-            // stream-following, so the button appearing is exactly the
-            // signal that the list has stopped following.
+            // Jump-to-bottom, shown exactly while the list is not following,
+            // so the button appearing is the signal that following stopped.
             AnimatedVisibility(
-                visible = !atBottom,
+                visible = !following,
                 enter = fadeIn() + scaleIn(initialScale = 0.85f),
                 exit = fadeOut() + scaleOut(targetScale = 0.85f),
                 modifier = Modifier
@@ -338,7 +356,13 @@ fun MessageListView(
             ) {
                 val appearance = config.appearance
                 Surface(
-                    onClick = { scope.launch { scrollState.animateScrollTo(scrollState.maxValue) } },
+                    onClick = {
+                        // Set first: the animation isn't a reader scroll, so
+                        // nothing else would turn following back on, and a
+                        // reply still growing would leave it short of the end.
+                        following = true
+                        scope.launch { scrollState.animateScrollTo(scrollState.maxValue) }
+                    },
                     shape = CircleShape,
                     color = appearance.surface,
                     shadowElevation = 4.dp,

@@ -1,6 +1,25 @@
 package com.makemore.agentfrontend.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -118,7 +137,7 @@ fun MessageView(
                 onAction = onBlockAction,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
+                    .padding(horizontal = 16.dp)
                     .semantics(mergeDescendants = false) {}
                     .testTag(bubbleTag),
                 config = config,
@@ -130,7 +149,7 @@ fun MessageView(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .padding(horizontal = 16.dp, vertical = 2.dp)
             .semantics(mergeDescendants = false) {}
             .testTag(bubbleTag),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
@@ -344,6 +363,10 @@ fun MessageView(
                                     // for what the agent actually emits — a
                                     // rule between every sentence.
                                     horizontalRule = { },
+                                    // The library's table gives every column
+                                    // the same width and ellipsises each cell
+                                    // at one line. Drawn here instead, as iOS.
+                                    table = { TableBlock(it, prose, textColor) },
                                 ),
                             )
                         } else {
@@ -499,6 +522,168 @@ private fun HeadingBlock(
     Box(modifier = Modifier.padding(top = appearance.messageBlockSpacing / 2)) {
         MarkdownHeader(content = model.content, node = model.node, style = style)
     }
+}
+
+/** Widest a table cell grows before its text wraps — iOS caps at 280pt. */
+private val TABLE_CELL_MAX_WIDTH = 280.dp
+
+/**
+ * A GitHub-style pipe table, mirroring iOS `MarkdownTextView`'s `.table`
+ * block: columns sized to their content up to [TABLE_CELL_MAX_WIDTH], cells
+ * wrapping rather than truncating, semibold header, striped rows, and a
+ * horizontal scroll for tables wider than the screen.
+ */
+@Composable
+private fun TableBlock(model: MarkdownComponentModel, style: TextStyle, textColor: Color) {
+    val source = model.content.substring(model.node.startOffset, model.node.endOffset)
+    val table = remember(source) { parsePipeTable(source) } ?: return
+    val columns = table.first().size
+    // iOS sets cells in callout, a step under the body size.
+    val cellStyle = if (style.fontSize.isSpecified) style.copy(fontSize = style.fontSize * 0.94f) else style
+    val shape = RoundedCornerShape(8.dp)
+    val stripe = textColor.copy(alpha = 0.05f)
+    val header = textColor.copy(alpha = 0.1f)
+    val scroll = rememberScrollState()
+
+    Layout(
+        content = {
+            table.forEachIndexed { rowIndex, row ->
+                val background = when {
+                    rowIndex == 0 -> header
+                    rowIndex % 2 == 0 -> stripe
+                    else -> Color.Transparent
+                }
+                row.forEach { cell ->
+                    Box(
+                        modifier = Modifier
+                            .background(background)
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    ) {
+                        Text(
+                            text = remember(cell) { inlineTableMarkdown(cell) },
+                            style = if (rowIndex == 0) cellStyle.copy(fontWeight = FontWeight.SemiBold) else cellStyle,
+                            color = textColor,
+                        )
+                    }
+                }
+            }
+        },
+        modifier = Modifier
+            .horizontalScrollHint(scroll, textColor)
+            .padding(bottom = 8.dp)
+            .horizontalScroll(scroll)
+            .clip(shape)
+            .border(1.dp, header, shape),
+    ) { measurables, _ ->
+        // Column width is its widest cell on one line, capped; row height is
+        // its tallest cell once wrapped to that width. Every cell is then
+        // measured at exactly its grid slot so the backgrounds tile.
+        val maxCell = TABLE_CELL_MAX_WIDTH.roundToPx()
+        val rowCount = measurables.size / columns
+        val widths = IntArray(columns) { c ->
+            minOf(maxCell, (0 until rowCount).maxOf { r ->
+                measurables[r * columns + c].maxIntrinsicWidth(Constraints.Infinity)
+            })
+        }
+        val heights = IntArray(rowCount) { r ->
+            (0 until columns).maxOf { c -> measurables[r * columns + c].minIntrinsicHeight(widths[c]) }
+        }
+        val placeables = measurables.mapIndexed { i, measurable ->
+            measurable.measure(Constraints.fixed(widths[i % columns], heights[i / columns]))
+        }
+        layout(widths.sum(), heights.sum()) {
+            var y = 0
+            for (r in 0 until rowCount) {
+                var x = 0
+                for (c in 0 until columns) {
+                    placeables[r * columns + c].place(x, y)
+                    x += widths[c]
+                }
+                y += heights[r]
+            }
+        }
+    }
+}
+
+/**
+ * Shows that a table runs on past the screen: the content fades out at
+ * whichever edge has more to reveal, and a thumb under the table tracks the
+ * position. Draws nothing when the table fits. Reads the scroll position in
+ * the draw phase only, so dragging never recomposes the table.
+ */
+private fun Modifier.horizontalScrollHint(scroll: ScrollState, color: Color): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val max = scroll.maxValue
+        if (max == 0 || max == Int.MAX_VALUE) return@drawWithContent
+        val fade = 36.dp.toPx()
+        if (scroll.value < max) {
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    listOf(Color.Black, Color.Transparent),
+                    startX = size.width - fade,
+                    endX = size.width,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+        if (scroll.value > 0) {
+            drawRect(
+                brush = Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = 0f, endX = fade),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+        val thumbHeight = 3.dp.toPx()
+        val thumbWidth = size.width * size.width / (size.width + max)
+        drawRoundRect(
+            color = color.copy(alpha = 0.35f),
+            topLeft = Offset((size.width - thumbWidth) * scroll.value / max, size.height - thumbHeight),
+            size = Size(thumbWidth, thumbHeight),
+            cornerRadius = CornerRadius(thumbHeight / 2),
+        )
+    }
+
+/**
+ * Header row followed by body rows, every row padded or trimmed to the header's
+ * column count (as iOS). Null when the text isn't a header + separator table.
+ */
+internal fun parsePipeTable(source: String): List<List<String>>? {
+    val lines = source.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    if (lines.size < 2) return null
+    val headers = pipeTableCells(lines[0])
+    val separator = pipeTableCells(lines[1])
+    if (headers.isEmpty() || separator.any { !it.matches(Regex(":?-+:?")) }) return null
+    val rows = lines.drop(2).map { line ->
+        val cells = pipeTableCells(line)
+        List(headers.size) { cells.getOrElse(it) { "" } }
+    }
+    return listOf(headers) + rows
+}
+
+private fun pipeTableCells(line: String): List<String> =
+    line.removePrefix("|").removeSuffix("|")
+        .split(Regex("(?<!\\\\)\\|"))
+        .map { it.trim().replace("\\|", "|") }
+
+/** Bold, italic, inline code, links (label only) and `<br>` inside a cell. */
+internal fun inlineTableMarkdown(text: String): AnnotatedString = buildAnnotatedString {
+    val token = Regex("""\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|`(.+?)`|\[(.+?)]\((?:.+?)\)""")
+    val source = text.replace(Regex("<br\\s*/?>", RegexOption.IGNORE_CASE), "\n")
+    var cursor = 0
+    for (match in token.findAll(source)) {
+        append(source.substring(cursor, match.range.first))
+        val (bold, boldAlt, italic, code, link) = match.destructured
+        when {
+            bold.isNotEmpty() || boldAlt.isNotEmpty() ->
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(bold + boldAlt) }
+            italic.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(italic) }
+            code.isNotEmpty() -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(code) }
+            else -> append(link)
+        }
+        cursor = match.range.last + 1
+    }
+    append(source.substring(cursor))
 }
 
 @Composable
