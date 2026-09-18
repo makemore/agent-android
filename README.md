@@ -13,7 +13,7 @@ The Gradle project exposes:
 
 `ChatViewModel.runState` exposes the canonical lifecycle: `IDLE`, `SENDING`, `STREAMING`, `WAITING`, `CANCELLING`, `CANCELLED`, `FAILED`, `SUCCEEDED`. `WAITING` is used for `run.suspended` and `client.action.required` so mobile UI does not remain stuck in a loading state.
 
-Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. `AgentStreamEvent` and `AgentRunReducerState` provide headless typed parsing/reducer primitives for custom clients that do not want the bundled `ChatViewModel`. The shared backend contract is documented in `agent/docs/mobile-protocol-contract.md`.
+Supported visible event primitives include assistant deltas/messages, tool calls/results, content blocks, cancellations/failures/success, memory updates, sub-agent markers, and generic required-action cards. `AgentStreamEvent` and `AgentRunReducerState` provide headless typed parsing/reducer primitives for custom clients that do not want the bundled `ChatViewModel`. The shared backend contract is documented in `packages/python/django_agent_runtime/docs/mobile-protocol-contract.md`.
 
 The library boundary is intentionally generic: `agent-client` owns agent stream events, SSE lifecycle, reducer state, tool/required-action semantics, fixtures, and tests. Host products own navigation, push notifications, integrations UI, branding, terminal sessions, and app-specific persistence.
 
@@ -326,7 +326,7 @@ The `:example` module is a manual scenario launcher for the chat widget. Open th
 **Model picker, extended thinking & presence orb** (parity with `agent-ios` 0.9.0)
 
 - **Model picker** — `ChatViewModel` gains `availableModels` / `selectedModelId` / `selectedModel` / `selectedModelDisplayName` plus `loadModels()`, populated from `GET /api/agent-runtime/models/`. `runtimeDefaultModelId` captures `ModelsResponse.default` so the composer's model pill pre-selects the runtime's configured fallback until the user picks otherwise.
-- **Extended thinking** — per-conversation `extendedThinking` toggle forwarded to the runtime as `thinking: true` (see `agent/docs/mobile-protocol-contract.md`). Off by default; reset when the conversation is cleared.
+- **Extended thinking** — per-conversation `extendedThinking` toggle forwarded to the runtime as `thinking: true` (see `packages/python/django_agent_runtime/docs/mobile-protocol-contract.md`). Off by default; reset when the conversation is cleared.
 - **Run parameters** — `ResponseStyle` (normal/concise/…) and `ToolAccess` (auto/…) enums plus `researchEnabled` / `webSearchEnabled` flags, surfaced through `setResponseStyle` / `setToolAccess` / `setResearchEnabled` / `setWebSearchEnabled` and serialised into each turn via `runParamsSnapshot()`.
 - **`PresenceOrbView`** — new public composable: a breathing, swirling presence sphere (Compose port of the iOS `PresenceOrbView` / `agent_presence_orb.svg`). Renders as a small leading avatar in the widget when `ChatWidgetConfig.showPresenceOrb` is true, or can be embedded directly in a host top bar / splash.
 - **`AddToChatSheet` rework** — expanded attachment/configuration sheet (camera + Recents tiles, action rows, tool toggles, connectors), re-skinning automatically for `.classic` hosts.
