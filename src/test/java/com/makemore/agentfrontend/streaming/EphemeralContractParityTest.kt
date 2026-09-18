@@ -22,12 +22,11 @@ import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Layer B — cross-platform parity. Drives the shared
- * `clients/test-fixtures/ephemeral/contract.json` scenarios through the real
+ * `test-harness/fixtures/ephemeral/contract.json` scenarios through the real
  * [ChatViewModel] + [APIClient] + SSEClient and asserts exactly what the
  * client puts on the wire in ephemeral mode. The iOS
  * `EphemeralContractParityTests` asserts the same contract — that shared
@@ -202,18 +201,8 @@ class EphemeralContractParityTest {
         )
     }
 
-    // -- Contract loader (mirrors SSEFixture.locateFixturesDir) --
+    // -- Contract loader (shares canonical-first discovery with SSEFixture) --
 
-    private fun loadContractText(): String {
-        var dir: File? = File("").absoluteFile
-        repeat(10) {
-            val cur = dir ?: return@repeat
-            for (rel in listOf("clients/test-fixtures/ephemeral", "test-fixtures/ephemeral")) {
-                val f = File(File(cur, rel), "contract.json")
-                if (f.isFile) return f.readText()
-            }
-            dir = cur.parentFile
-        }
-        error("Could not locate test-fixtures/ephemeral/contract.json from ${File("").absolutePath}")
-    }
+    private fun loadContractText(): String =
+        SharedFixture.locate("ephemeral/contract.json").readText()
 }
