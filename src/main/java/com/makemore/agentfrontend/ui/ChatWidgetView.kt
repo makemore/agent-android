@@ -46,6 +46,9 @@ fun ChatWidgetView(
      *  to pass a second copy; hosts that build their own client can
      *  inject it explicitly. */
     apiClient: APIClient? = null,
+    /** A one-shot request to the composer as the chat opens — see
+     *  [ComposerRequest]. */
+    composerRequest: ComposerRequest? = null,
 ) {
     var showSystemPicker by remember { mutableStateOf(false) }
     var showSidebar by remember { mutableStateOf(false) }
@@ -237,6 +240,7 @@ fun ChatWidgetView(
                     },
                 )
             } else {
+            CompositionLocalProvider(LocalComposerRequest provides composerRequest) {
             InputView(
                 config = config,
                 isLoading = viewModel.isLoading.value,
@@ -251,6 +255,7 @@ fun ChatWidgetView(
                 onCancel = { viewModel.cancelRun() },
                 viewModel = viewModel,
             )
+            }
             }
         }
 

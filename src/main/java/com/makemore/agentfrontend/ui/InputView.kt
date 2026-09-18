@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
@@ -20,6 +21,9 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.Alignment
@@ -38,6 +42,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.makemore.agentfrontend.configuration.ChatAppearance
 import android.Manifest
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
@@ -108,6 +114,28 @@ private const val RMS_NORMAL_DB = 4f
 /** Rise that reads as loud — draws full-height bars. */
 private const val RMS_LOUD_DB = 9f
 
+/** What a host can ask the composer to do as the chat opens — see [ComposerStandIn]. */
+enum class ComposerAction {
+    /** Focus the field and raise the keyboard. */
+    FOCUS,
+    /** Press the speaker (speak replies aloud) toggle. */
+    TOGGLE_SPEAK_REPLIES,
+    /** Press the hands-free auto-send toggle. */
+    TOGGLE_HANDS_FREE,
+    /** Press the mic: start dictating (asks for the permission if needed). */
+    DICTATE,
+}
+
+/**
+ * A one-shot request to the composer, for hosts that open the chat from a
+ * "message…" bar elsewhere: the person pressed a control there, so the real
+ * one should act as the chat opens. Each new [id] is honoured once. Set through
+ * `ChatWidgetView(composerRequest = …)`.
+ */
+data class ComposerRequest(val id: Int, val action: ComposerAction)
+
+val LocalComposerRequest = compositionLocalOf<ComposerRequest?> { null }
+
 @Composable
 fun InputView(
     config: ChatWidgetConfig,
@@ -150,7 +178,18 @@ fun InputView(
         inputTextState.value.isNotBlank() || attachedFiles.isNotEmpty()
     val isRecordingState = remember { mutableStateOf(false) }
     val isRecording = isRecordingState.value
-    var hasAudioPermission by remember { mutableStateOf(false) }
+    // Seeded from the real grant. It used to start false on every visit, so
+    // the first mic tap after opening the chat only re-asked for a permission
+    // already held and recorded nothing; dictation took a second tap.
+    var hasAudioPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    // The mic was tapped without the permission: start once it is granted,
+    // rather than making the person tap again.
+    var startDictationOnGrant by remember { mutableStateOf(false) }
     var lastSendWasMic by remember { mutableStateOf(false) }
     val countdownState = remember { mutableFloatStateOf(0f) }
     val countdownProgress = countdownState.floatValue
@@ -189,7 +228,10 @@ fun InputView(
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted -> hasAudioPermission = granted }
+    ) { granted ->
+        hasAudioPermission = granted
+        if (!granted) startDictationOnGrant = false
+    }
 
     // Camera capture — TakePicturePreview returns a thumbnail Bitmap
     // which we re-encode as JPEG and stage as a FileAttachment so it
@@ -274,6 +316,23 @@ fun InputView(
         audioLevelState.floatValue = 0f
         monitorModeRef[0] = false
         bargeInFiredRef[0] = false
+    }
+
+    fun beginDictation() {
+        isRecordingState.value = true
+        dictationRef[0]++
+        rmsFloorRef[0] = Float.MAX_VALUE
+        consecutiveErrorsRef[0] = 0
+        bargeInFiredRef[0] = false
+        monitorModeRef[0] = isAgentSpeaking
+        startListeningInternal()
+    }
+
+    LaunchedEffect(hasAudioPermission, startDictationOnGrant) {
+        if (hasAudioPermission && startDictationOnGrant) {
+            startDictationOnGrant = false
+            if (!isRecordingState.value) beginDictation()
+        }
     }
 
     /**
@@ -582,15 +641,10 @@ fun InputView(
                             if (!speechInputAvailable) {
                                 // Fail closed when local/offline recognition is required but unavailable.
                             } else if (!hasAudioPermission) {
+                                startDictationOnGrant = true
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
-                                isRecordingState.value = true
-                                dictationRef[0]++
-                                rmsFloorRef[0] = Float.MAX_VALUE
-                                consecutiveErrorsRef[0] = 0
-                                bargeInFiredRef[0] = false
-                                monitorModeRef[0] = isAgentSpeaking
-                                startListeningInternal()
+                                beginDictation()
                             }
                         }
                     },
@@ -626,15 +680,10 @@ fun InputView(
                         } else {
                             dismissTextKeyboard()
                             if (!hasAudioPermission) {
+                                startDictationOnGrant = true
                                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             } else {
-                                isRecordingState.value = true
-                                dictationRef[0]++
-                                rmsFloorRef[0] = Float.MAX_VALUE
-                                consecutiveErrorsRef[0] = 0
-                                bargeInFiredRef[0] = false
-                                monitorModeRef[0] = isAgentSpeaking
-                                startListeningInternal()
+                                beginDictation()
                             }
                         }
                     },
@@ -942,6 +991,43 @@ private fun AnthropicComposer(
                 .background(config.appearance.surface)
                 .animateContentSize(),
         ) {
+            // Hoisted above the slot: the field moves between the one- and
+            // two-row slots, and a focus request must not replay when it does.
+            val composerFocus = remember { FocusRequester() }
+            val request = LocalComposerRequest.current
+            var honouredRequestId by rememberSaveable { mutableStateOf(0) }
+            val keyboard = LocalSoftwareKeyboardController.current
+            val toggleSpeakReplies by rememberUpdatedState(onToggleSpeakReplies)
+            val toggleAutoSend by rememberUpdatedState(onToggleAutoSend)
+            val toggleRecording by rememberUpdatedState(onToggleRecording)
+            LaunchedEffect(request, isRecording, isTranscribing) {
+                val pending = request?.takeIf { it.id != honouredRequestId } ?: return@LaunchedEffect
+                when (pending.action) {
+                    ComposerAction.FOCUS -> {
+                        // The field isn't composed while dictating or
+                        // transcribing; wait for it to come back.
+                        if (isRecording || isTranscribing) return@LaunchedEffect
+                        honouredRequestId = pending.id
+                        // Let the field attach before asking it for focus.
+                        withFrameNanos { }
+                        runCatching { composerFocus.requestFocus() }
+                        keyboard?.show()
+                    }
+                    ComposerAction.TOGGLE_SPEAK_REPLIES -> {
+                        honouredRequestId = pending.id
+                        toggleSpeakReplies()
+                    }
+                    ComposerAction.TOGGLE_HANDS_FREE -> {
+                        honouredRequestId = pending.id
+                        toggleAutoSend()
+                    }
+                    ComposerAction.DICTATE -> {
+                        honouredRequestId = pending.id
+                        if (!isRecording) toggleRecording()
+                    }
+                }
+            }
+
             // The field slot: its own row when two-row, otherwise inline
             // with the leading controls and the trailing mic/send.
             @Composable
@@ -970,6 +1056,7 @@ private fun AnthropicComposer(
                             onValueChange = onInputChange,
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .focusRequester(composerFocus)
                                 .onSizeChanged { size ->
                                     // Only record the width while single-row —
                                     // the two-row field is full-card width,
@@ -1138,6 +1225,106 @@ private fun DictationStopButton(
  * else. Stopping never touches the run — the reply keeps arriving as
  * text, you just stop hearing it. Mirrors the iOS speakRepliesButton.
  */
+/**
+ * A stand-in for the composer, for hosts that show a "message…" bar outside
+ * the chat (a home screen) and open the chat when it is used. Built from the
+ * composer's own pieces so the two can't drift apart.
+ *
+ * Nothing happens here: each control reports what was pressed through
+ * [onAction], and the host opens the chat and hands the same action to
+ * `ChatWidgetView(composerRequest = …)`, where the real control acts. The
+ * send button is the composer's idle grey one and does nothing, exactly as it
+ * does with an empty field.
+ */
+@Composable
+fun ComposerStandIn(
+    config: ChatWidgetConfig,
+    onAction: (ComposerAction) -> Unit,
+    modifier: Modifier = Modifier,
+    /** Mirror the chat's speaker toggle. The real one also needs a voice
+     *  controller, which a stand-in has no way to know about. */
+    showSpeaker: Boolean = config.enableTTS && config.showTTSButton,
+    showVoice: Boolean = config.enableVoice,
+    /** Speak-replies isn't persisted by the library, so the host says. */
+    speakRepliesEnabled: Boolean = false,
+) {
+    val appearance = config.appearance
+    val context = LocalContext.current
+    // Hands-free is a persisted preference, so show it as the chat will.
+    val autoSendEnabled = remember {
+        SharedPreferencesStorage(context, prefix = "voice").get("autoSend") == "true"
+    }
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(appearance.background)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(appearance.composerCornerRadius))
+                .background(appearance.surface)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (showSpeaker) {
+                SpeakRepliesButton(
+                    enabled = speakRepliesEnabled,
+                    accent = appearance.accent,
+                    tint = appearance.textSecondary,
+                    onClick = { onAction(ComposerAction.TOGGLE_SPEAK_REPLIES) },
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 36.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClickLabel = "Open chat",
+                        onClick = { onAction(ComposerAction.FOCUS) },
+                    )
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    config.placeholder,
+                    color = appearance.textSecondary,
+                    style = appearance.userStyle(MaterialTheme.typography.bodyLarge),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (showVoice) {
+                AutoSendToggle(
+                    autoSendEnabled = autoSendEnabled,
+                    accent = appearance.accent,
+                    onClick = { onAction(ComposerAction.TOGGLE_HANDS_FREE) },
+                )
+                MicButton(
+                    isRecording = false,
+                    autoSendEnabled = autoSendEnabled,
+                    countdownProgress = 0f,
+                    onClick = { onAction(ComposerAction.DICTATE) },
+                )
+            }
+            RightActionButton(
+                isLoading = false,
+                isAgentSpeaking = false,
+                canSend = false,
+                accent = appearance.accent,
+                textOnAccent = appearance.textOnAccent,
+                onCancel = {},
+                onStopAgent = {},
+                onSend = {},
+            )
+        }
+    }
+}
+
 @Composable
 private fun SpeakRepliesButton(
     enabled: Boolean,
