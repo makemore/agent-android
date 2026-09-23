@@ -1315,7 +1315,9 @@ class ChatViewModel(
         messages.removeAll { it.id in runMessageIds }
         runMessageIds.clear()
         val existing = messages.map { it.id }.toMutableSet()
-        finals.drop(overlap).filterNot { it.role == "user" }.forEachIndexed { index, message ->
+        // Never show system messages: a run's saved transcript can start with
+        // the agent's prompt and run context, which are not for the reader.
+        finals.drop(overlap).filterNot { it.role == "user" || it.role == "system" }.forEachIndexed { index, message ->
             mapApiMessage(message.copy(id = message.id ?: "${currentRunId}-final-$index")).forEach { mapped ->
                 if (existing.add(mapped.id)) {
                     messages.add(mapped)
