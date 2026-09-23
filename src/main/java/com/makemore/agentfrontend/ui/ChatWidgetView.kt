@@ -117,7 +117,8 @@ fun ChatWidgetView(
             .imePadding()
             .pointerInput(Unit) { detectTapGestures(onTap = { focusManager.clearFocus() }) }
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        // Readable width on tablets; the Box behind keeps the full-width background.
+        Column(modifier = Modifier.fillMaxSize().readableColumn()) {
             // Built-in top bar (hamburger + new-chat pencil). Hosts
             // that provide their own navigation chrome set
             // `config.showInternalTopBar = false` and surface
