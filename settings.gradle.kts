@@ -26,6 +26,10 @@ rootProject.name = "agent-frontend"
 // Core protocol/transport library — zero Compose dependencies.
 include(":agent-client")
 
+// Optional on-device neural TTS (Kokoro-82M on ONNX Runtime, our own G2P).
+// A separate artifact so apps that don't use it don't ship its native libraries.
+include(":agent-kokoro")
+
 // Sample host app — manual scenario launcher for the chat widget. Mirrors
 // `clients/agent-ios/Example`. Open this directory in Android Studio and
 // run the `:example` configuration to launch the launcher on a device or

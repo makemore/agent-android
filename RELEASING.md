@@ -6,8 +6,9 @@ Packages, no publish CI). A release is therefore just **a pushed semver tag**.
 
 - `com.github.makemore.agent-android:agent-client` — headless runtime/transport core
 - `com.github.makemore.agent-android:agent-frontend` — Compose chat widget (depends on `agent-client`)
+- `com.github.makemore.agent-android:agent-kokoro` — optional on-device Kokoro voice (depends on `agent-frontend` and ONNX Runtime from Maven Central)
 
-Both ship from the **same tag** (JitPack injects it as `VERSION`) so consumers pin
+All ship from the **same tag** (JitPack injects it as `VERSION`) so consumers pin
 a single number.
 
 > **Audience:** library maintainers. If you are *consuming* the library in an app,
@@ -22,7 +23,7 @@ a single number.
 - On JitPack the build reads `GROUP` (`com.github.makemore.agent-android`) and
   `VERSION` (the tag) from the environment; `build.gradle.kts` derives the Gradle
   `group` / `version` from them. Locally it falls back to `com.makemore` and the
-  `agentVersion` property. Artifact ids are `agent-client` / `agent-frontend`.
+  `agentVersion` property. Artifact ids are `agent-client` / `agent-frontend` / `agent-kokoro`.
 - JDK / build environment is pinned in [`jitpack.yml`](jitpack.yml) (OpenJDK 17).
 
 ---
@@ -68,8 +69,8 @@ to the local Maven cache:
 
 ```bash
 GROUP=com.github.makemore.agent-android VERSION=0.8.0 \
-  ./gradlew :agent-client:publishToMavenLocal :publishToMavenLocal -x test --no-daemon
-# Inspect: ~/.m2/repository/com/github/makemore/agent-android/agent-{client,frontend}/0.8.0/
+  ./gradlew :agent-client:publishToMavenLocal :publishToMavenLocal :agent-kokoro:publishToMavenLocal -x test --no-daemon
+# Inspect: ~/.m2/repository/com/github/makemore/agent-android/agent-{client,frontend,kokoro}/0.8.0/
 # Confirm agent-frontend's POM depends on agent-client under the same group.
 ```
 

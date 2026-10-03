@@ -30,6 +30,23 @@ interface TTSProvider {
     suspend fun listVoices(): List<VoiceDescriptor> = emptyList()
 
     /**
+     * Hint that [text] will be passed to [speak] soon, after the utterance
+     * currently playing. Providers with a slow synthesis step (on-device
+     * neural engines) may start rendering it now so consecutive sentence
+     * chunks play without a gap. Must not block and must not play audio.
+     * [cancel] discards anything prefetched. Default: no-op.
+     */
+    fun prefetch(text: String, options: TTSSpeakOptions = TTSSpeakOptions()) {}
+
+    /**
+     * A new assistant turn is starting ([VoiceController.reset]). Providers
+     * that degrade for the rest of a turn after an error (for example an
+     * on-device engine falling back to the system voice) recover here.
+     * Default: no-op.
+     */
+    fun onTurnStart() {}
+
+    /**
      * Release any held native resources. The controller calls this when
      * the user closes the chat / disposes the view model. Most providers
      * can leave this as a no-op.

@@ -28,6 +28,7 @@ anonymously. Two artifacts are available:
 |------------|----------|
 | `com.github.makemore.agent-android:agent-client:<version>` | Headless core — models, networking, SSE, storage (no Compose) |
 | `com.github.makemore.agent-android:agent-frontend:<version>` | Compose chat widget + UI primitives (depends on `agent-client`) |
+| `com.github.makemore.agent-android:agent-kokoro:<version>` | *Optional* on-device neural voice (Kokoro on ONNX Runtime); see [On-device neural voice](#on-device-neural-voice-kokoro) |
 
 The latest version is the most recent tag on
 [makemore/agent-android](https://github.com/makemore/agent-android/tags).
@@ -47,9 +48,9 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:3.0.1")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:3.1.0")   // Compose UI + headless core
     // or, headless only:
-    // implementation("com.github.makemore.agent-android:agent-client:3.0.1")
+    // implementation("com.github.makemore.agent-android:agent-client:3.1.0")
 }
 ```
 
@@ -202,6 +203,165 @@ back to the best local voice for the device locale. Speech input also has
 `speechInputPolicy`; protected mode defaults to on-device/offline recognition
 and disables the mic when Android cannot provide it.
 
+### On-device neural voice (Kokoro)
+
+The optional `agent-kokoro` artifact adds **Kokoro-82M** (v1.0), a
+high-quality neural English voice that runs entirely on the device: the
+Kokoro ONNX model on [ONNX Runtime](https://onnxruntime.ai) (MIT), with our
+own Kotlin port of the text-to-phoneme front end. There is **no espeak-ng
+and no other GPL, AGPL or LGPL code or data** in it. It is the same engine
+(`"kokoro"`), voices, assets and phonemes as the iOS and web clients: all
+three implement the cross-platform spec in the meta-repo's
+`tools/kokoro-assets/README.md` and pass its golden vectors. Assistant text
+never leaves the device, so it is allowed in `LOCAL_ONLY` / `privateOnly` mode.
+
+```kotlin
+dependencies {
+    implementation("com.github.makemore.agent-android:agent-frontend:<version>")
+    implementation("com.github.makemore.agent-android:agent-kokoro:<version>")
+}
+```
+
+```kotlin
+import com.makemore.agentfrontend.voice.kokoro.KokoroOptions
+import com.makemore.agentfrontend.voice.kokoro.KokoroTTS
+
+val kokoro = KokoroTTS.engine(context, KokoroOptions(voice = "af_heart"))  // same instance per options
+val config = ChatWidgetConfig(
+    enableTTS = true,
+    ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY,   // or privateOnly = true
+    localTtsEngine = kokoro,                            // opt-in; null keeps Android TextToSpeech
+)
+```
+
+`localTtsEngine` is used whenever voice output resolves to *local* (LOCAL_ONLY,
+private mode, or AUTOMATIC without a voice proxy); a configured remote voice is
+unchanged. `VoiceFactory.plan(config).localEngine == "kokoro"` tells you it was
+picked. A Kokoro id in `ChatWidgetConfig.voiceId` overrides the engine's voice
+for that chat. Without the widget, build the provider directly:
+`KokoroTTSProvider(kokoro) { AndroidTTSProvider(context, localOnly = true) }`.
+
+**Public API** (`com.makemore.agentfrontend.voice.kokoro`, names aligned with iOS and web):
+
+| | |
+| --- | --- |
+| `KokoroTTS.ENGINE_NAME` | `"kokoro"` |
+| `KokoroTTS.engine(context, options)` | the engine (a `LocalTTSEngine`), cached per options |
+| `KokoroOptions(baseUrl, voice, speed, cacheDirectory, autoDownload, allowCellularDownload, numThreads)` | defaults: `KokoroTTS.DEFAULT_BASE_URL`, `"af_heart"`, `1.0`, `noBackupFilesDir/agent-kokoro`, `true`, `false`, `0` (ONNX Runtime default) |
+| `engine.allowCellularDownload` | runtime switch, starts as the option; set `true` then call `prepare()` to download on a metered network |
+| `suspend engine.prepare()` / `engine.prefetch()` | download + verify + load the configured voice; idempotent; `prefetch()` returns immediately |
+| `engine.state: StateFlow<KokoroState>` | `NotDownloaded`, `Downloading`, `Loading`, `Ready`, `Failed(error)` |
+| `engine.onModelProgress` / `engine.modelProgress` | callback / `StateFlow` of `KokoroModelProgress(state, fraction, bytesDownloaded, bytesTotal)` |
+| `suspend engine.voices()` | `List<KokoroVoice>` (`id`, `name`, `language`, `gender`, `suggested`, `grade`) from `voices.json`; built-in copy offline (`KokoroVoices.all`) |
+| `suspend engine.deleteDownloadedModel()` / `clearCache()` | unload and delete every downloaded file |
+| `engine.downloadedBytes` | bytes the cache uses on the device |
+| `engine.onSpeechMetrics` | `KokoroSpeechMetrics(loadMs, firstAudioMs, chunkCount, audioSeconds, synthSeconds)` after each utterance (also logged under `AgentVoice`) |
+| `engine.lastLoadMs`, `engine.unload()` | last load duration; free the loaded engine (files stay) |
+
+**Downloads.** Nothing is bundled in the AAR/APK. The engine reads
+`manifest.json` from `baseUrl` (default
+`https://storage.googleapis.com/makemore-voice-models/kokoro/v1/`, an immutable
+versioned folder; HTTPS, or `file://` for a side-loaded copy) and fetches only
+what the voice needs: the model, its vocab, `voices.json`, the voice's style
+pack and its language's G2P (gzip dictionaries + `g2p.onnx`). Language comes
+from the voice id: `a*` voices are `en-us`, `b*` voices `en-gb`.
+
+| Voice | Download (stored on the device) |
+| --- | --- |
+| `af_heart` (en-us) | 97,404,535 bytes ≈ **97.4 MB** |
+| `bf_emma` (en-gb) | 97,498,865 bytes ≈ **97.5 MB** |
+| each further voice / the other language | + 0.52 MB / + about 4.6 MB (the model is shared) |
+
+Every file's size and SHA-256 are checked against the manifest before it is
+used; files are cached by SHA-256 under `noBackupFilesDir/agent-kokoro`
+(out of cloud backups and not evicted like the cache dir). Interrupted
+downloads resume from where they stopped (HTTP `Range`), or restart if the
+server ignores the range. The only network requests are these GETs: no text,
+no identifiers. With `autoDownload = true` (default) the download starts in the
+background the first time Kokoro would speak or a reply starts; until it is
+ready, replies use the local-only Android system voice. Set it to `false` to
+download only when you call `prefetch()`/`prepare()` (e.g. after asking the
+user).
+
+**Not over cellular by default.** While the active network is metered
+(cellular, metered Wi-Fi, or unknown) and `allowCellularDownload` is `false`
+(default, as on iOS), nothing is fetched: `state` stays `NotDownloaded`, the
+system voice speaks, `prepare()` throws `KokoroAssetException` with reason
+`metered_network`, and the download starts by itself as soon as the device is
+on an unmetered network. To download anyway, set
+`engine.allowCellularDownload = true` (or the option) and call `prepare()`.
+A voice that is already downloaded loads and speaks on any network. This uses
+`ConnectivityManager`, so `agent-kokoro`'s manifest declares
+`ACCESS_NETWORK_STATE`, a normal permission granted at install (no prompt);
+`agent-frontend` itself declares no new permission.
+
+```kotlin
+kokoro.onModelProgress = { p -> /* "Downloading voice… ${(p.fraction * 100).toInt()}%" */ }
+kokoro.prefetch()
+kokoro.voices()                    // for a voice picker
+kokoro.deleteDownloadedModel()     // free the space
+```
+
+**How it speaks.** Each sentence chunk from `VoiceController` is normalised
+(numbers, money, dates, times, units, abbreviations), tokenised, tagged and
+looked up in misaki's gold/silver dictionaries, with a small BART model for
+unknown words; the phonemes are cut into chunks of at most 510 tokens and then
+at sentence ends (the first piece of a reply also at a clause mark), and each
+piece is rendered by Kokoro and streamed to one `AudioTrack` (24 kHz float,
+streaming mode) while the next renders; the next sentence is rendered while
+the current one plays. Everything runs on a dedicated background thread, never
+the main thread; `stop()` and a new turn cancel playback and synthesis
+promptly. The engine (≈ 92 MB model plus dictionaries) loads once and is
+shared by every chat; a new turn loads it in the background if needed, and it
+is unloaded when the last chat closes. If the engine cannot load (e.g. an ABI
+without native libraries) or synthesis fails, that turn falls back to the local
+system voice; logs carry reason codes and timings only, never text.
+
+**Voices** (`KokoroVoices.all`, 28, default `af_heart`; `af_heart` and
+`bf_emma` are the suggested ones): American English `af_heart`, `af_bella`,
+`af_nicole`, `af_aoede`, `af_kore`, `af_sarah`, `af_alloy`, `af_nova`,
+`af_sky`, `af_jessica`, `af_river`, `am_fenrir`, `am_michael`, `am_puck`,
+`am_echo`, `am_eric`, `am_liam`, `am_onyx`, `am_santa`, `am_adam`; British
+English `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily`, `bm_fable`,
+`bm_george`, `bm_lewis`, `bm_daniel`. Unknown ids use the engine's voice.
+
+**App size.** ONNX Runtime's AAR carries native libraries for four ABIs
+(uncompressed / compressed in the APK): arm64-v8a 28.7 MB / 10.6 MB,
+armeabi-v7a 20.5 MB / 9.6 MB, x86_64 34.7 MB / 12.5 MB, x86 34.7 MB / 12.6 MB.
+Ship an App Bundle (Play delivers one ABI) or restrict ABIs:
+
+```kotlin
+android { defaultConfig { ndk { abiFilters += listOf("arm64-v8a") } } }
+```
+
+**Tests.** `./gradlew :agent-kokoro:testDebugUnitTest -PkokoroAssets=<path to kokoro/v1>`
+runs the golden vectors (1,190 G2P rows, 112 BART rows, 14 token rows, 4 chunk
+rows; all must match exactly) and an end-to-end synthesis on the JVM with
+ONNX Runtime's desktop build. Without `-PkokoroAssets` (or `KOKORO_ASSETS`)
+the tests that need the dictionaries/models are skipped with a message; the
+rest use fakes. `KokoroOnDeviceTest` (`connectedDebugAndroidTest`) runs the
+real engine and `AudioTrack` on a device or emulator after the asset folder is
+pushed (see its KDoc).
+
+**Licences and privacy.** Everything `agent-kokoro` ships or downloads is
+permissive; there is no GPL, AGPL or LGPL code or data:
+
+| Component | Licence | Notes |
+| --- | --- | --- |
+| `agent-kokoro` code, including the G2P port | Apache-2.0 (G2P derived from [misaki](https://github.com/hexgrad/misaki), Apache-2.0) | |
+| `com.microsoft.onnxruntime:onnxruntime-android:1.28.0` | MIT | Its only third-party code is listed in ONNX Runtime's [ThirdPartyNotices.txt (v1.28.0)](https://github.com/microsoft/onnxruntime/blob/v1.28.0/ThirdPartyNotices.txt): permissive licences (MIT, BSD, Apache-2.0, Boost, zlib, public domain) plus **Eigen, MPL-2.0**, used unmodified (owner-approved 2026-10-03). The notices file's only GNU mentions are Microsoft's standard LGPL reverse-engineering clause and the definition of "Secondary License" inside the MPL-2.0 text. No transitive Maven dependencies. |
+| Downloaded assets (`kokoro/v1`: model, voices, dictionaries, `g2p.onnx`) | Apache-2.0 | See the asset folder's `NOTICE` and `manifest.json` |
+| `kotlinx-coroutines-android` | Apache-2.0 | already used by `agent-frontend` |
+
+ONNX Runtime is pinned to **1.28.0** on purpose: from 1.29 the Android AAR
+registers a `ContentProvider` that starts a Microsoft telemetry client (1DS) at
+app launch and reads device identifiers. 1.28.0 has no such provider or
+endpoint (and declares no permissions), and the engine also calls
+`OrtEnvironment.setTelemetry(false)`. Re-check this before upgrading.
+Apps must include ONNX Runtime's MIT licence and its third-party notices in
+their open-source notices screen when they ship `agent-kokoro`; copies of both
+(v1.28.0) are in [`agent-kokoro/licenses/onnxruntime-1.28.0/`](agent-kokoro/licenses/onnxruntime-1.28.0).
+
 ### Auth Strategies
 
 | Strategy            | Description                          |
@@ -268,6 +428,7 @@ AgentFrontend.ChatWidget(
 |-----------------|----------------------------------------------------------------|--------------|
 | `agent-client`  | Models, networking, SSE, configuration, storage                | OkHttp, kotlinx-serialization |
 | `agent-frontend` (root) | Compose chat widget + view layer                              | `agent-client`, Compose BOM |
+| `agent-kokoro` (optional) | On-device Kokoro TTS: G2P, ONNX inference, asset download   | `agent-frontend`, ONNX Runtime (Android) |
 
 The Compose module re-exports `agent-client` via `api(project(":agent-client"))`, so existing consumers that depend on the root module continue to work unchanged. New consumers can depend on `agent-client` alone to build a custom UI without pulling in Compose.
 
@@ -296,6 +457,17 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### 3.1.0
+
+**Optional on-device neural voice: Kokoro (`agent-kokoro`)**
+
+- **New optional artifact `agent-kokoro`** — `KokoroTTSProvider` speaks with Kokoro-82M v1.0 on the device: the Kokoro ONNX model on ONNX Runtime 1.28.0 (MIT) with our own Kotlin port of the English G2P (no espeak-ng or other GPL code). Apps that do not add it ship no native libraries. Engine name `"kokoro"`, the 28 English voice ids (`af_heart` default), assets and phonemes match iOS and web; the G2P passes all cross-platform golden vectors.
+- **Assets downloaded on demand, verified, resumable** — `KokoroTTSEngine` reads `manifest.json` from `KokoroOptions.baseUrl` (default: our public `kokoro/v1` folder), fetches only what the chosen voice and its language need (≈ 97.4 MB), checks size and SHA-256, caches by hash and resumes interrupted downloads. Not over metered networks unless `allowCellularDownload` (default `false`); it then starts by itself on an unmetered network. Adds the normal `ACCESS_NETWORK_STATE` permission. `prepare()` / `prefetch()`, `state`, `onModelProgress`, `voices()`, `deleteDownloadedModel()`, `downloadedBytes` and `onSpeechMetrics` (time to first audio) for hosts.
+- **Streams while it renders** — pieces of each sentence play on one `AudioTrack` as soon as each is rendered; the next sentence renders while the current one plays; cancellation is prompt; all work is off the main thread.
+- **Falls back to the local-only system voice** while the voice is missing, if the engine cannot load, or for the rest of a turn after a synthesis error — text never leaves the device; logs contain reason codes and timings only.
+- **`ChatWidgetConfig.localTtsEngine`** (new, default `null`) plugs an on-device engine into `VoiceFactory`'s local path (`KokoroTTS.engine(context)`); `VoiceProviderPlan.localEngine` reports it. When it stands in for an engine, `AndroidTTSProvider` is always local-only.
+- **`TTSProvider.prefetch()` / `onTurnStart()`** — new no-op-by-default hooks. `VoiceController` offers queued chunks for prefetch while one is playing, and signals a new turn from `reset()`. Additive; existing providers are unaffected.
 
 ### 3.0.1
 

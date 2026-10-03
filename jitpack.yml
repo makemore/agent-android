@@ -9,7 +9,8 @@
 jdk:
   - openjdk17
 
-# Publish only the two library modules to the local Maven repo (skip the
-# :example app and tests for a fast, reliable build).
+# Publish only the library modules to the local Maven repo (skip the
+# :example app and tests for a fast, reliable build). :agent-kokoro is the
+# optional on-device Kokoro TTS artifact.
 install:
-  - ./gradlew :agent-client:publishToMavenLocal :publishToMavenLocal -x test --no-daemon
+  - ./gradlew :agent-client:publishToMavenLocal :publishToMavenLocal :agent-kokoro:publishToMavenLocal -x test --no-daemon

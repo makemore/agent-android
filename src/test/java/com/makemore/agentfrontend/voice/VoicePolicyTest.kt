@@ -2,7 +2,9 @@ package com.makemore.agentfrontend.voice
 
 import com.makemore.agentfrontend.configuration.APIPaths
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
+import android.content.Context
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -156,5 +158,85 @@ class VoicePolicyTest {
 
         assertEquals(VoiceProviderKind.NONE, plan.kind)
         assertTrue(plan.mode is VoiceMode.Unavailable)
+    }
+    // -- Pluggable local engine (e.g. agent-kokoro) --------------------
+
+    private object FakeEngine : LocalTTSEngine {
+        override val name = "kokoro"
+        override fun makeProvider(context: Context, request: LocalTTSEngineRequest): TTSProvider =
+            throw UnsupportedOperationException("not built in plan tests")
+    }
+
+    @Test
+    fun `default config uses android tts for local voice`() {
+        val config = ChatWidgetConfig(enableTTS = true, ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY)
+
+        assertNull(config.localTtsEngine)
+        assertNull(VoiceFactory.plan(config).localEngine)
+    }
+
+    @Test
+    fun `local engine speaks local only plans`() {
+        val config = ChatWidgetConfig(
+            enableTTS = true,
+            ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY,
+            localTtsEngine = FakeEngine,
+        )
+
+        val plan = VoiceFactory.plan(config, apiClientAvailable = true)
+
+        assertEquals(VoiceProviderKind.LOCAL, plan.kind)
+        assertEquals(VoiceMode.Local, plan.mode)
+        assertEquals("kokoro", plan.localEngine)
+    }
+
+    @Test
+    fun `local engine is used in private mode automatic`() {
+        val config = ChatWidgetConfig(privateOnly = true, enableTTS = true, localTtsEngine = FakeEngine)
+
+        val plan = VoiceFactory.plan(config, apiClientAvailable = true)
+
+        assertEquals(VoiceProviderKind.LOCAL, plan.kind)
+        assertEquals("kokoro", plan.localEngine)
+    }
+
+    @Test
+    fun `local engine does not displace a configured remote voice`() {
+        val automatic = VoiceFactory.plan(ChatWidgetConfig(enableTTS = true, localTtsEngine = FakeEngine))
+        assertEquals(VoiceProviderKind.REMOTE, automatic.kind)
+        assertNull(automatic.localEngine)
+
+        val remote = VoiceFactory.plan(
+            ChatWidgetConfig(enableTTS = true, ttsProviderPolicy = TTSProviderPolicy.REMOTE, localTtsEngine = FakeEngine),
+        )
+        assertEquals(VoiceProviderKind.REMOTE, remote.kind)
+        assertNull(remote.localEngine)
+
+        val disabled = VoiceFactory.plan(
+            ChatWidgetConfig(enableTTS = true, ttsProviderPolicy = TTSProviderPolicy.DISABLED, localTtsEngine = FakeEngine),
+        )
+        assertEquals(VoiceProviderKind.NONE, disabled.kind)
+        assertNull(disabled.localEngine)
+    }
+
+    @Test
+    fun `local engine is used when automatic has no voice endpoint`() {
+        val config = ChatWidgetConfig(enableTTS = true, apiPaths = APIPaths(voiceToken = null), localTtsEngine = FakeEngine)
+
+        assertEquals("kokoro", VoiceFactory.plan(config).localEngine)
+    }
+
+    @Test
+    fun `system voice standing in for a local engine never uses network voices`() {
+        val automatic = ChatWidgetConfig(enableTTS = true, apiPaths = APIPaths(voiceToken = null))
+
+        assertTrue(VoiceFactory.androidTtsLocalOnly(automatic, asEngineFallback = true))
+        assertFalse(VoiceFactory.androidTtsLocalOnly(automatic, asEngineFallback = false))
+        assertTrue(
+            VoiceFactory.androidTtsLocalOnly(
+                automatic.copy(ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY),
+                asEngineFallback = false,
+            ),
+        )
     }
 }
