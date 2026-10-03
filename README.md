@@ -205,6 +205,12 @@ and disables the mic when Android cannot provide it.
 
 ### On-device neural voice (Kokoro)
 
+> **Do not ship / do not merge.** This prototype must not ship: sherpa-onnx's
+> prebuilt `libsherpa-onnx-jni.so` statically embeds **espeak-ng (GPL-3.0)** and
+> the downloaded model includes `espeak-ng-data` (GPL-3.0), which the
+> no-GPL rule forbids (owner decision, 2026-10-03). Kept on the `kokoro-tts`
+> branch for reference only.
+
 The optional `agent-kokoro` artifact adds **Kokoro-82M** (v1.0), a
 high-quality neural voice that runs entirely on the device through
 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It is the same engine
@@ -402,7 +408,7 @@ The `:example` module is a manual scenario launcher for the chat widget. Open th
 
 ### Unreleased
 
-**Optional on-device neural voice: Kokoro (`agent-kokoro`)**
+**Optional on-device neural voice: Kokoro (`agent-kokoro`)** — *must not ship: embeds GPL-3.0 espeak-ng (see the Kokoro section); branch kept for reference*
 
 - **New optional artifact `agent-kokoro`** — `KokoroTTSProvider` speaks with Kokoro-82M v1.0 on the device via sherpa-onnx 1.13.8 (`com.github.k2-fsa.sherpa-onnx:sherpa-onnx`). Apps that do not add it ship no native libraries. Engine name `"kokoro"` and Kokoro voice ids (`af_heart` default, 54 voices) match iOS and web.
 - **Model downloaded once, on first use** — `KokoroModelManager` fetches sherpa-onnx's `kokoro-int8-multi-lang-v1_0.tar.bz2` (configurable `modelUrl`, optional `expectedSha256`), reports `Downloading(bytes, total)` / `Installing` / `Ready` / `Failed(reason)` through `state`, caches it under `noBackupFilesDir/agent-kokoro`, and offers `download()` / `cancelDownload()` / `delete()`. HTTPS only; archive entries cannot escape the cache directory.
