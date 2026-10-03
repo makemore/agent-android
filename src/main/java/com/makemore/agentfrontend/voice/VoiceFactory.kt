@@ -11,6 +11,11 @@ enum class VoiceProviderKind { REMOTE, LOCAL, NONE }
 data class VoiceProviderPlan(
     val kind: VoiceProviderKind,
     val mode: VoiceMode,
+    /**
+     * Name of the on-device engine that will speak a [VoiceProviderKind.LOCAL]
+     * plan (`"kokoro"`), or `null` for Android `TextToSpeech`.
+     */
+    val localEngine: String? = null,
 )
 
 data class VoiceProviderResolution(
@@ -24,10 +29,28 @@ data class VoiceProviderResolution(
  *
  * Resolution order:
  *   1. ElevenLabs proxy when `apiPaths.voiceToken` is set.
- *   2. [AndroidTTSProvider] (always available on Android API 21+).
+ *   2. Local: `config.localTtsEngine` (e.g. Kokoro) when set, falling back to
+ *      local-only [AndroidTTSProvider]; otherwise [AndroidTTSProvider].
  */
 object VoiceFactory {
     fun plan(config: ChatWidgetConfig, apiClientAvailable: Boolean = true): VoiceProviderPlan {
+        val base = basePlan(config, apiClientAvailable)
+        return if (base.kind == VoiceProviderKind.LOCAL && config.localTtsEngine != null) {
+            base.copy(localEngine = config.localTtsEngine.name)
+        } else {
+            base
+        }
+    }
+
+    /**
+     * Whether the Android `TextToSpeech` provider must refuse voices that need
+     * the network. Always true when it stands in for a local engine: that
+     * fallback exists so text never leaves the device.
+     */
+    internal fun androidTtsLocalOnly(config: ChatWidgetConfig, asEngineFallback: Boolean): Boolean =
+        asEngineFallback || config.effectiveTtsProviderPolicy == TTSProviderPolicy.LOCAL_ONLY
+
+    private fun basePlan(config: ChatWidgetConfig, apiClientAvailable: Boolean): VoiceProviderPlan {
         if (config.ttsProviderPolicy == TTSProviderPolicy.DISABLED) {
             return VoiceProviderPlan(VoiceProviderKind.NONE, VoiceMode.Disabled)
         }
@@ -74,14 +97,23 @@ object VoiceFactory {
                 defaultVoiceId = voiceId,
                 defaultModelId = modelId,
             )
-            VoiceProviderKind.LOCAL -> AndroidTTSProvider(
-                context = context,
-                defaultVoiceId = voiceId,
-                localOnly = config.effectiveTtsProviderPolicy == TTSProviderPolicy.LOCAL_ONLY,
-                enginePackageName = config.localTtsEnginePackageName,
-                preferredLocale = config.localVoiceLocale ?: java.util.Locale.getDefault(),
-                genderPreference = config.localVoiceGenderPreference,
-            )
+            VoiceProviderKind.LOCAL -> {
+                val engine = config.localTtsEngine
+                fun androidTts(asEngineFallback: Boolean) = AndroidTTSProvider(
+                    context = context,
+                    // A local engine's voice ids (e.g. Kokoro's "af_heart")
+                    // mean nothing to TextToSpeech; let it pick a local voice.
+                    defaultVoiceId = if (asEngineFallback) null else voiceId,
+                    localOnly = androidTtsLocalOnly(config, asEngineFallback),
+                    enginePackageName = config.localTtsEnginePackageName,
+                    preferredLocale = config.localVoiceLocale ?: java.util.Locale.getDefault(),
+                    genderPreference = config.localVoiceGenderPreference,
+                )
+                engine?.makeProvider(
+                    context,
+                    LocalTTSEngineRequest(voiceId = voiceId, fallback = { androidTts(asEngineFallback = true) }),
+                ) ?: androidTts(asEngineFallback = false)
+            }
             VoiceProviderKind.NONE -> null
         }
         return VoiceProviderResolution(provider = provider, mode = plan.mode)

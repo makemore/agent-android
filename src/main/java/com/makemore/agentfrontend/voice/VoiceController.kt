@@ -169,6 +169,7 @@ class VoiceController(
         currentEmotion = null
         chunker.reset()
         recentSpokenText.value = ""
+        provider?.onTurnStart()
     }
 
     /**
@@ -201,7 +202,13 @@ class VoiceController(
     private fun enqueue(text: String) {
         if (text.isEmpty()) return
         queue.addLast(text)
-        if (drainJob == null) startDrain()
+        if (drainJob == null) {
+            startDrain()
+        } else {
+            // Something is already playing, so this chunk will wait its turn.
+            // Let providers with a slow synthesis step render it meanwhile.
+            provider?.prefetch(text, TTSSpeakOptions(emotion = currentEmotion))
+        }
     }
 
     private fun startDrain() {

@@ -2,6 +2,7 @@ package com.makemore.agentfrontend.configuration
 
 import androidx.compose.ui.graphics.Color
 import com.makemore.agentfrontend.networking.DisconnectReason
+import com.makemore.agentfrontend.voice.LocalTTSEngine
 import com.makemore.agentfrontend.voice.LocalVoiceGenderPreference
 import com.makemore.agentfrontend.voice.SpeechInputPolicy
 import com.makemore.agentfrontend.voice.TTSProviderPolicy
@@ -197,6 +198,14 @@ data class ChatWidgetConfig(
     val localVoiceLocale: Locale? = null,
     /** Best-effort gender preference for Android on-device TTS voices. Android engines expose gender inconsistently, so this is applied as a hint. */
     val localVoiceGenderPreference: LocalVoiceGenderPreference = LocalVoiceGenderPreference.MALE,
+    /**
+     * Optional on-device neural engine used whenever voice output resolves to
+     * local (LOCAL_ONLY, private mode, or AUTOMATIC without a voice proxy),
+     * e.g. `KokoroTTS.engine(context)` from the optional `agent-kokoro`
+     * artifact. `null` (default) keeps Android `TextToSpeech`. The engine
+     * never sends text off the device and falls back to local system voices.
+     */
+    val localTtsEngine: LocalTTSEngine? = null,
 
     // -- Callbacks --
     /** Event callback for SSE events */

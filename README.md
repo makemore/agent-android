@@ -28,6 +28,7 @@ anonymously. Two artifacts are available:
 |------------|----------|
 | `com.github.makemore.agent-android:agent-client:<version>` | Headless core — models, networking, SSE, storage (no Compose) |
 | `com.github.makemore.agent-android:agent-frontend:<version>` | Compose chat widget + UI primitives (depends on `agent-client`) |
+| `com.github.makemore.agent-android:agent-kokoro:<version>` | *Optional* on-device neural voice (Kokoro via sherpa-onnx); see [On-device neural voice](#on-device-neural-voice-kokoro) |
 
 The latest version is the most recent tag on
 [makemore/agent-android](https://github.com/makemore/agent-android/tags).
@@ -202,6 +203,107 @@ back to the best local voice for the device locale. Speech input also has
 `speechInputPolicy`; protected mode defaults to on-device/offline recognition
 and disables the mic when Android cannot provide it.
 
+### On-device neural voice (Kokoro)
+
+The optional `agent-kokoro` artifact adds **Kokoro-82M** (v1.0), a
+high-quality neural voice that runs entirely on the device through
+[sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). It is the same engine
+(`"kokoro"`), voice ids and model as the iOS and web clients. Assistant text
+never leaves the device, so it is allowed in `LOCAL_ONLY` / `privateOnly`
+mode.
+
+```kotlin
+dependencies {
+    implementation("com.github.makemore.agent-android:agent-frontend:<version>")
+    implementation("com.github.makemore.agent-android:agent-kokoro:<version>")
+}
+```
+
+```kotlin
+import com.makemore.agentfrontend.voice.kokoro.KokoroTTS
+
+val config = ChatWidgetConfig(
+    enableTTS = true,
+    ttsProviderPolicy = TTSProviderPolicy.LOCAL_ONLY,   // or privateOnly = true
+    localTtsEngine = KokoroTTS.engine(context),          // same instance per options
+    voiceId = "af_heart",                                // any Kokoro voice id
+)
+```
+
+sherpa-onnx comes from JitPack too (`com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.8`);
+if you restrict the JitPack repository with `content { includeGroup(…) }`, add
+that group.
+
+`localTtsEngine` is used whenever voice output resolves to *local* (LOCAL_ONLY,
+private mode, or AUTOMATIC without a voice proxy); a configured remote voice is
+unchanged. `VoiceFactory.plan(config).localEngine == "kokoro"` tells you it was
+picked. Without the widget, build the provider directly:
+`KokoroTTSProvider(KokoroTTS.modelManager(context)) { AndroidTTSProvider(context, localOnly = true) }`.
+
+**Model download.** The model is *not* in the AAR/APK. On first use it is
+downloaded once (a plain GET of the model URL — no text, no identifiers) from
+sherpa-onnx's release
+[`kokoro-int8-multi-lang-v1_0.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_0.tar.bz2)
+(**~126 MiB** download, **~186 MiB** installed under
+`noBackupFilesDir/agent-kokoro`; unpacking takes up to a minute or two on
+slower devices). Until it is ready, and if it fails, replies use the local-only
+Android system voice for that turn. Hosts can control it:
+
+```kotlin
+val models = KokoroTTS.modelManager(context)
+models.state.collect { state ->              // NotDownloaded / Downloading(bytes, total) /
+    // e.g. "Downloading voice… 42%"        // Installing / Ready / Failed(reason)
+    (state as? KokoroModelState.Downloading)?.fraction
+}
+models.download()        // prefetch (e.g. on Wi-Fi) — suspends until Ready/Failed
+models.delete()          // free the space; the system voice is used until re-downloaded
+```
+
+`KokoroOptions` (passed to `KokoroTTS.engine(context, options)`) sets
+`modelUrl` (HTTPS mirror), `expectedSha256` (pin it when you mirror),
+`modelDirectory`, `autoDownload` (`false` = only when you call `download()`),
+`defaultVoiceId`, `speed` and `numThreads`.
+
+**Behaviour.** Each sentence chunk from `VoiceController` is synthesised on a
+dedicated background thread and streamed to `AudioTrack`; the next chunk is
+rendered while the current one plays; `stop()` cancels promptly. If the engine
+cannot load (e.g. an ABI without native libs) or a chunk fails, that turn falls
+back to the local system voice; logs carry reason codes only, never text.
+
+**Voices** (`KokoroTTSProvider.listVoices()` / `KokoroVoices.all`, 54 voices,
+default `af_heart`): American English `af_heart`, `af_bella`, `af_nicole`,
+`af_sarah`, `af_sky`, `am_michael`, `am_adam`, `am_fenrir`, `am_puck` …;
+British English `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily`, `bm_george`,
+`bm_fable`, `bm_lewis`, `bm_daniel`; plus Spanish (`ef_`/`em_`), French
+(`ff_siwis`), Hindi (`hf_`/`hm_`), Italian (`if_`/`im_`), Japanese (`jf_`/`jm_`,
+limited), Brazilian Portuguese (`pf_`/`pm_`) and Mandarin (`zf_`/`zm_`).
+Unknown ids fall back to the default voice.
+
+**App size.** The sherpa-onnx AAR carries native libraries for four ABIs
+(uncompressed): arm64-v8a ≈ 32 MB, armeabi-v7a ≈ 22 MB, x86_64 ≈ 35 MB,
+x86 ≈ 36 MB (≈ 12 MB each compressed). Ship an App Bundle (Play delivers one
+ABI) or restrict ABIs, and you can drop two libraries the Kotlin API does not
+load (saves ≈ 5 MB on arm64):
+
+```kotlin
+android {
+    defaultConfig { ndk { abiFilters += listOf("arm64-v8a") } }
+    packaging { jniLibs { excludes += listOf("**/libsherpa-onnx-c-api.so", "**/libsherpa-onnx-cxx-api.so") } }
+}
+```
+
+Synthesis is CPU-bound (int8 model, 2 threads by default); recent arm64
+phones keep up with playback, older devices may pause between sentences.
+`agent-kokoro`'s JVM tests use fakes; `KokoroOnDeviceSmokeTest` runs the real
+model on a device/emulator once the archive is pushed (see its KDoc).
+
+**Licences.** sherpa-onnx: Apache-2.0. ONNX Runtime (inside the AAR): MIT.
+Kokoro-82M weights and the sherpa-onnx model package: Apache-2.0. **espeak-ng**
+(used for phonemisation) is **GPL-3.0**: it is compiled into
+`libsherpa-onnx-jni.so` and its `espeak-ng-data` is part of the downloaded
+model — review this with your licensing policy before shipping `agent-kokoro`.
+`agent-frontend` itself does not include any of it.
+
 ### Auth Strategies
 
 | Strategy            | Description                          |
@@ -268,6 +370,7 @@ AgentFrontend.ChatWidget(
 |-----------------|----------------------------------------------------------------|--------------|
 | `agent-client`  | Models, networking, SSE, configuration, storage                | OkHttp, kotlinx-serialization |
 | `agent-frontend` (root) | Compose chat widget + view layer                              | `agent-client`, Compose BOM |
+| `agent-kokoro` (optional) | On-device Kokoro TTS provider + model manager               | `agent-frontend`, sherpa-onnx, commons-compress |
 
 The Compose module re-exports `agent-client` via `api(project(":agent-client"))`, so existing consumers that depend on the root module continue to work unchanged. New consumers can depend on `agent-client` alone to build a custom UI without pulling in Compose.
 
@@ -296,6 +399,16 @@ example/                          # Sample host app — open in Android Studio
 The `:example` module is a manual scenario launcher for the chat widget. Open this repo in Android Studio, select the `example` run configuration, and deploy to a device or emulator. Mirrors the layout of `clients/agent-ios/Example`.
 
 ## Changelog
+
+### Unreleased
+
+**Optional on-device neural voice: Kokoro (`agent-kokoro`)**
+
+- **New optional artifact `agent-kokoro`** — `KokoroTTSProvider` speaks with Kokoro-82M v1.0 on the device via sherpa-onnx 1.13.8 (`com.github.k2-fsa.sherpa-onnx:sherpa-onnx`). Apps that do not add it ship no native libraries. Engine name `"kokoro"` and Kokoro voice ids (`af_heart` default, 54 voices) match iOS and web.
+- **Model downloaded once, on first use** — `KokoroModelManager` fetches sherpa-onnx's `kokoro-int8-multi-lang-v1_0.tar.bz2` (configurable `modelUrl`, optional `expectedSha256`), reports `Downloading(bytes, total)` / `Installing` / `Ready` / `Failed(reason)` through `state`, caches it under `noBackupFilesDir/agent-kokoro`, and offers `download()` / `cancelDownload()` / `delete()`. HTTPS only; archive entries cannot escape the cache directory.
+- **Falls back to the local-only system voice** while the model is missing, if the engine cannot load, or for the rest of a turn after a synthesis error — text never leaves the device; logs contain reason codes only.
+- **`ChatWidgetConfig.localTtsEngine`** (new, default `null`) plugs an on-device engine into `VoiceFactory`'s local path (`KokoroTTS.engine(context)`); `VoiceProviderPlan.localEngine` reports it. When it stands in for an engine, `AndroidTTSProvider` is always local-only.
+- **`TTSProvider.prefetch()` / `onTurnStart()`** — new no-op-by-default hooks. `VoiceController` offers queued chunks for prefetch while one is playing, and signals a new turn from `reset()`. Additive; existing providers are unaffected.
 
 ### 3.0.1
 

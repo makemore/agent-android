@@ -18,6 +18,12 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // sherpa-onnx's Android AAR (used only by :agent-kokoro) is served
+        // by JitPack — the same repository consumers already use for this
+        // library. Scoped so nothing else resolves from it.
+        maven("https://jitpack.io") {
+            content { includeGroup("com.github.k2-fsa.sherpa-onnx") }
+        }
     }
 }
 
@@ -25,6 +31,10 @@ rootProject.name = "agent-frontend"
 
 // Core protocol/transport library — zero Compose dependencies.
 include(":agent-client")
+
+// Optional on-device neural TTS (Kokoro-82M via sherpa-onnx). A separate
+// artifact so apps that don't use it don't ship its native libraries.
+include(":agent-kokoro")
 
 // Sample host app — manual scenario launcher for the chat widget. Mirrors
 // `clients/agent-ios/Example`. Open this directory in Android Studio and
