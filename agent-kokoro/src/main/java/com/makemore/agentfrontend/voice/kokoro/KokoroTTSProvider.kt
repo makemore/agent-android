@@ -8,11 +8,9 @@ import com.makemore.agentfrontend.voice.VoiceDescriptor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
@@ -23,27 +21,27 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
- * On-device neural TTS: Kokoro-82M (v1.0) through sherpa-onnx.
+ * On-device neural TTS: Kokoro-82M (v1.0) on ONNX Runtime with our own
+ * English G2P (no espeak).
  *
- * - Text never leaves the device. The only network access is the one-time
- *   model download done by [KokoroModelManager] (a GET of the model URL).
+ * - Text never leaves the device. The only network access is the asset
+ *   download done by [KokoroTTSEngine] (GETs of the configured base URL).
  * - Each [speak] call (one [com.makemore.agentfrontend.voice.VoiceController]
- *   sentence chunk) is synthesised on a dedicated background thread and
- *   streamed to an [android.media.AudioTrack] as audio is produced; chunks
- *   play strictly in order. [prefetch] renders the next chunk while the
- *   current one plays so consecutive chunks join without a gap.
+ *   sentence chunk) is converted to phonemes and split into pieces on a
+ *   dedicated background thread; each piece is rendered and streamed to one
+ *   [android.media.AudioTrack] as soon as it is ready, so playback starts
+ *   after the first piece and the next renders while it plays. [prefetch]
+ *   renders the next sentence while the current one plays.
  * - [cancel] stops playback and abandons queued synthesis promptly.
- * - Falls back to [fallback] (the local-only system voice) while the model
- *   is not downloaded, if the engine cannot load, and — for the rest of the
- *   turn — after a synthesis/playback error. Logs carry reason codes only,
- *   never text.
+ * - Falls back to [fallback] (the local-only system voice) while the voice is
+ *   not downloaded, if the engine cannot load, and — for the rest of the
+ *   turn — after a synthesis/playback error. Logs carry reason codes and
+ *   timings only, never text.
  */
 class KokoroTTSProvider internal constructor(
-    private val modelManager: KokoroModelManager,
-    private val options: KokoroOptions,
+    private val engine: KokoroTTSEngine,
     defaultVoiceId: String?,
     private val fallbackFactory: () -> TTSProvider,
-    private val loader: KokoroSynthesizerLoader,
     private val audioOutput: PcmAudioOutput,
     private val synthExecutor: ExecutorService,
     private val playbackDispatcher: CoroutineDispatcher,
@@ -52,24 +50,21 @@ class KokoroTTSProvider internal constructor(
 ) : TTSProvider {
 
     /**
-     * @param modelManager usually [KokoroTTS.modelManager].
-     * @param defaultVoiceId a Kokoro voice id (e.g. `"bm_george"`); unknown
-     *   ids use [KokoroOptions.defaultVoiceId].
-     * @param fallback builds the provider used when Kokoro cannot speak — it
+     * @param engine usually [KokoroTTS.engine].
+     * @param defaultVoiceId a Kokoro voice id (e.g. `"bm_george"`); unknown ids
+     *   use the engine's configured voice.
+     * @param fallback builds the provider used when Kokoro cannot speak; it
      *   must itself keep text on the device (e.g.
      *   `AndroidTTSProvider(context, localOnly = true)`).
      */
     constructor(
-        modelManager: KokoroModelManager,
-        options: KokoroOptions = KokoroOptions(),
+        engine: KokoroTTSEngine,
         defaultVoiceId: String? = null,
         fallback: () -> TTSProvider,
     ) : this(
-        modelManager = modelManager,
-        options = options,
+        engine = engine,
         defaultVoiceId = defaultVoiceId,
         fallbackFactory = fallback,
-        loader = SherpaKokoroSynthesizer.loader(options.numThreads),
         audioOutput = AudioTrackOutput,
         synthExecutor = newSynthesisExecutor(),
         playbackDispatcher = Dispatchers.IO,
@@ -85,9 +80,6 @@ class KokoroTTSProvider internal constructor(
     private val defaultVoice: KokoroVoice
 
     // Guarded by [lock].
-    private var engine: KokoroSynthesizer? = null
-    private var engineLoad: Deferred<KokoroSynthesizer?>? = null
-    private var engineUnavailable = false
     private var shutDown = false
     private val prefetched = LinkedHashMap<String, Utterance>()
     private var current: Utterance? = null
@@ -100,9 +92,10 @@ class KokoroTTSProvider internal constructor(
     init {
         val requested = KokoroVoices.find(defaultVoiceId)
         if (defaultVoiceId != null && requested == null) {
-            log("kokoro: configured voice id is not a Kokoro voice; using the default voice")
+            log("kokoro: configured voice id is not a Kokoro voice; using the engine's voice")
         }
-        defaultVoice = requested ?: KokoroVoices.find(options.defaultVoiceId) ?: KokoroVoices.default
+        defaultVoice = requested ?: engine.voice
+        engine.providerCreated()
     }
 
     // -- TTSProvider ------------------------------------------------
@@ -110,12 +103,14 @@ class KokoroTTSProvider internal constructor(
     override suspend fun speak(text: String, options: TTSSpeakOptions) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
-        val synth = engineForSpeech()
+        val started = clock()
+        val request = request(trimmed, options)
+        val synth = engineForSpeech(request.voice)
         if (synth == null) {
             fallback().speak(trimmed, options)
             return
         }
-        val request = request(trimmed, options)
+        val loadMs = clock() - started
         val utterance = synchronized(lock) {
             val u = takePrefetchedLocked(request) ?: Utterance(request)
             current = u
@@ -126,7 +121,22 @@ class KokoroTTSProvider internal constructor(
             u
         }
         try {
-            withContext(playbackDispatcher) { play(utterance, synth.sampleRate) }
+            val firstAudioAt = withContext(playbackDispatcher) { play(utterance, synth.sampleRate) }
+            utterance.stats?.let { s ->
+                val metrics = KokoroSpeechMetrics(
+                    loadMs = loadMs,
+                    firstAudioMs = firstAudioAt?.let { it - started } ?: -1,
+                    chunkCount = s.chunkCount,
+                    audioSeconds = s.audioSeconds,
+                    synthSeconds = s.synthSeconds,
+                )
+                log(
+                    "kokoro: first audio ${metrics.firstAudioMs} ms (load ${metrics.loadMs} ms), " +
+                        "${s.chunkCount} chunks, ${"%.2f".format(Locale.ROOT, s.audioSeconds)} s audio " +
+                        "in ${"%.2f".format(Locale.ROOT, s.synthSeconds)} s",
+                )
+                engine.reportMetrics(metrics)
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (e: Exception) {
@@ -144,16 +154,17 @@ class KokoroTTSProvider internal constructor(
 
     override fun prefetch(text: String, options: TTSSpeakOptions) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty() || fallbackForTurn || !modelManager.isAvailable) return
+        if (trimmed.isEmpty() || fallbackForTurn) return
+        val request = request(trimmed, options)
+        val synth = engine.loadedSynthesizer(request.voice) ?: return
         synchronized(lock) {
-            if (shutDown || engineUnavailable) return
+            if (shutDown) return
             if (prefetched.size >= MAX_PREFETCH || prefetched.containsKey(trimmed)) return
-            val u = Utterance(request(trimmed, options))
+            val u = Utterance(request)
             prefetched[trimmed] = u
             // Start now only if a chunk is already speaking (it was submitted
             // first); otherwise the next speak() starts it in order.
-            val synth = engine
-            if (current != null && synth != null) launchLocked(u, synth)
+            if (current != null) launchLocked(u, synth)
         }
     }
 
@@ -170,98 +181,76 @@ class KokoroTTSProvider internal constructor(
         fallbackForTurn = false
     }
 
+    /** A new assistant turn: recover from a fallback and get the engine loaded (or downloading) for the reply. */
     override fun onTurnStart() {
         fallbackForTurn = false
         synchronized(lock) { fallbackProvider }?.onTurnStart()
+        if (engine.loadedSynthesizer(defaultVoice) != null) return
+        scope.launch(playbackDispatcher) {
+            if (engine.isDownloaded(defaultVoice)) {
+                runCatching { engine.startPrepare(defaultVoice) }
+            } else {
+                maybeStartDownload(defaultVoice)
+            }
+        }
     }
 
     override suspend fun listVoices(): List<VoiceDescriptor> = KokoroVoices.all.map { it.toDescriptor() }
 
     override fun shutdown() {
         cancel()
-        val (loaded, fallback) = synchronized(lock) {
+        val (wasShutDown, fallback) = synchronized(lock) {
+            val was = shutDown
             shutDown = true
-            (engine to fallbackProvider).also { engine = null }
+            was to fallbackProvider
         }
-        runCatching { synthExecutor.execute { loaded?.release() } }
+        if (wasShutDown) return
         synthExecutor.shutdown()
         scope.cancel()
         fallback?.shutdown()
+        engine.providerReleased()
     }
 
     // -- Host helpers -------------------------------------------------
 
     /**
      * Load the engine now (e.g. when the chat opens) so the first reply does
-     * not wait 1–3 s for it. Returns true when Kokoro is ready to speak.
-     * Does not download; see [KokoroModelManager.download].
+     * not wait for it. Returns true when Kokoro is ready to speak. Does not
+     * download; see [KokoroTTSEngine.prepare].
      */
-    suspend fun prepare(): Boolean = modelManager.isAvailable && engineForSpeech() != null
+    suspend fun prepare(): Boolean = engineForSpeech(defaultVoice, forTurn = false) != null
 
     // -- Internals ------------------------------------------------------
 
-    private suspend fun engineForSpeech(): KokoroSynthesizer? {
-        if (fallbackForTurn) return null
-        if (!modelManager.isAvailable) {
-            releaseEngine()
-            maybeStartDownload()
+    private suspend fun engineForSpeech(voice: KokoroVoice, forTurn: Boolean = true): KokoroSynthesizer? {
+        if (forTurn && fallbackForTurn) return null
+        engine.loadedSynthesizer(voice)?.let { return it }
+        val downloaded = withContext(playbackDispatcher) { engine.isDownloaded(voice) }
+        if (!downloaded) {
+            if (!forTurn) return null
+            maybeStartDownload(voice)
             // Keep one voice for the whole reply even if the download
             // finishes part-way through it.
             fallbackForTurn = true
-            log("kokoro: model not on the device yet; using the system voice for this turn")
-            return null
-        }
-        val load = synchronized(lock) {
-            if (engineUnavailable || shutDown) return null
-            engine?.let { return it }
-            engineLoad ?: scope.async(synthDispatcher) { loadEngine() }.also { engineLoad = it }
-        }
-        return load.await()
-    }
-
-    private fun loadEngine(): KokoroSynthesizer? {
-        val files = modelManager.modelFiles()
-        if (files == null) {
-            synchronized(lock) { engineLoad = null }
+            log("kokoro: voice not on the device yet; using the system voice for this turn")
             return null
         }
         return try {
-            val loaded = loader.load(files)
-            synchronized(lock) {
-                engineLoad = null
-                if (shutDown) {
-                    loaded.release()
-                    return null
-                }
-                engine = loaded
-            }
-            loaded
-        } catch (t: Throwable) {
-            // Includes UnsatisfiedLinkError (no native lib for this ABI).
-            log("kokoro: engine failed to load (${t.javaClass.simpleName}); using the system voice")
-            synchronized(lock) {
-                engineUnavailable = true
-                engineLoad = null
-            }
+            engine.synthesizerFor(voice)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (e: KokoroAssetException) {
+            log("kokoro: engine unavailable (${e.reason}); using the system voice for this turn")
+            if (forTurn) fallbackForTurn = true
             null
         }
     }
 
-    private fun releaseEngine() {
-        val loaded = synchronized(lock) { engine.also { engine = null } } ?: return
-        runCatching { synthExecutor.execute { loaded.release() } }
-    }
-
-    private fun maybeStartDownload() {
-        if (!options.autoDownload) return
-        when (modelManager.state.value) {
-            KokoroModelState.NotDownloaded -> modelManager.startDownload()
-            is KokoroModelState.Failed ->
-                if (clock() - modelManager.lastFailureAtMillis >= DOWNLOAD_RETRY_AFTER_MS) {
-                    modelManager.startDownload()
-                }
-            else -> Unit
-        }
+    private fun maybeStartDownload(voice: KokoroVoice) {
+        if (!engine.options.autoDownload) return
+        val failed = engine.state.value is KokoroState.Failed
+        if (failed && clock() - engine.lastFailureAtMillis < DOWNLOAD_RETRY_AFTER_MS) return
+        engine.startPrepare(voice)
     }
 
     private fun fallback(): TTSProvider = synchronized(lock) {
@@ -275,8 +264,8 @@ class KokoroTTSProvider internal constructor(
 
     private fun request(text: String, speakOptions: TTSSpeakOptions): SpeechRequest {
         val voice = KokoroVoices.find(speakOptions.voiceId) ?: defaultVoice
-        val speed = (options.speed * emotionSpeed(speakOptions.emotion)).coerceIn(0.5f, 2.0f)
-        return SpeechRequest(text, voice, speed, KokoroVoices.espeakLanguage(voice))
+        val speed = (engine.options.speed * emotionSpeed(speakOptions.emotion)).coerceIn(0.5f, 2.0f)
+        return SpeechRequest(text, voice, speed)
     }
 
     /** Remove and return the prefetched entry for [request]; entries queued before it are stale. */
@@ -299,10 +288,9 @@ class KokoroTTSProvider internal constructor(
     private fun launchLocked(u: Utterance, synth: KokoroSynthesizer) {
         if (u.job != null || u.cancelled) return
         val r = u.request
-        val speakerId = if (r.voice.speakerId < synth.numSpeakers) r.voice.speakerId else defaultSpeaker(synth)
         u.job = scope.launch(synthDispatcher) {
             try {
-                synth.generate(r.text, speakerId, r.speed, r.language) { samples ->
+                u.stats = synth.generate(r.text, r.voice, r.speed) { samples ->
                     if (u.cancelled) {
                         false
                     } else {
@@ -320,14 +308,14 @@ class KokoroTTSProvider internal constructor(
         }
     }
 
-    private fun defaultSpeaker(synth: KokoroSynthesizer): Int =
-        if (KokoroVoices.default.speakerId < synth.numSpeakers) KokoroVoices.default.speakerId else 0
-
-    private suspend fun play(u: Utterance, sampleRate: Int) {
+    /** Plays [u]; returns the clock time of the first write (null if nothing played). */
+    private suspend fun play(u: Utterance, sampleRate: Int): Long? {
         var out: PcmPlayback? = null
+        var firstAudioAt: Long? = null
         try {
             for (samples in u.chunks) {
                 val p = out ?: openPlayback(u, sampleRate).also { out = it }
+                if (firstAudioAt == null) firstAudioAt = clock()
                 p.write(samples)
             }
             out?.finish()
@@ -337,6 +325,7 @@ class KokoroTTSProvider internal constructor(
                 synchronized(lock) { if (playback === p) playback = null }
             }
         }
+        return firstAudioAt
     }
 
     private fun openPlayback(u: Utterance, sampleRate: Int): PcmPlayback {
@@ -354,25 +343,21 @@ class KokoroTTSProvider internal constructor(
     private fun emotionSpeed(emotion: Emotion?): Float {
         if (emotion == null) return 1f
         val i = emotion.intensity.toFloat().coerceIn(0f, 1f)
-        return when (emotion.name.lowercase(Locale.US)) {
+        return when (emotion.name.lowercase(Locale.ROOT)) {
             "happy", "excited" -> 1f + 0.08f * i
             "sad", "concerned" -> 1f - 0.08f * i
             else -> 1f
         }
     }
 
-    private data class SpeechRequest(
-        val text: String,
-        val voice: KokoroVoice,
-        val speed: Float,
-        val language: String?,
-    )
+    private data class SpeechRequest(val text: String, val voice: KokoroVoice, val speed: Float)
 
     private class Utterance(val request: SpeechRequest) {
         val chunks = Channel<FloatArray>(Channel.UNLIMITED)
 
         @Volatile var cancelled = false
         @Volatile var job: Job? = null
+        @Volatile var stats: KokoroSynthesisStats? = null
 
         fun cancel() {
             cancelled = true

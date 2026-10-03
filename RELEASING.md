@@ -6,7 +6,7 @@ Packages, no publish CI). A release is therefore just **a pushed semver tag**.
 
 - `com.github.makemore.agent-android:agent-client` — headless runtime/transport core
 - `com.github.makemore.agent-android:agent-frontend` — Compose chat widget (depends on `agent-client`)
-- `com.github.makemore.agent-android:agent-kokoro` — optional on-device Kokoro voice (depends on `agent-frontend`, sherpa-onnx from JitPack)
+- `com.github.makemore.agent-android:agent-kokoro` — optional on-device Kokoro voice (depends on `agent-frontend` and ONNX Runtime from Maven Central)
 
 All ship from the **same tag** (JitPack injects it as `VERSION`) so consumers pin
 a single number.

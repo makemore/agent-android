@@ -48,7 +48,7 @@ class KokoroVoiceControllerTest {
         eventually { h.audio.events.count { it == "finish" } == 3 }
 
         val chunks = listOf("The first sentence is here.", "Then a second sentence follows.", "And a")
-        assertEquals(chunks, h.synth.calls.map { it.text }.distinct())
+        assertEquals(chunks, h.core.calls.map { it.text }.distinct())
         assertEquals(chunks.flatMap { listOf("$it#0", "$it#1") }, h.audio.writes())
         assertEquals(0, h.fallback.spoken.size)
         eventually { !vc.isSpeaking.value }
@@ -56,14 +56,14 @@ class KokoroVoiceControllerTest {
 
     @Test
     fun `stop interrupts kokoro playback`() {
-        val h = ProviderHarness(synth = FakeSynth(pieces = 2_000, pieceDelayMs = 2))
+        val h = ProviderHarness(core = FakeCore(pieces = 2_000, pieceDelayMs = 2))
         val vc = controller(h)
         onMain { vc.pushDelta("A long sentence that keeps going. Another one waiting here.") }
         eventually { h.audio.writes().isNotEmpty() }
 
         onMain { vc.stop() }
 
-        eventually { h.synth.stoppedEarly.isNotEmpty() }
+        eventually { h.core.stoppedEarly.isNotEmpty() }
         eventually { !vc.isSpeaking.value }
         Thread.sleep(50)
         assertTrue(h.audio.writes().none { it.startsWith("Another one") })
@@ -71,7 +71,7 @@ class KokoroVoiceControllerTest {
 
     @Test
     fun `a new turn after an engine error returns to kokoro`() {
-        val h = ProviderHarness(synth = FakeSynth(failOn = { it.startsWith("Broken") }))
+        val h = ProviderHarness(core = FakeCore(failOn = { it.startsWith("Broken") }))
         val vc = controller(h)
         onMain {
             vc.pushDelta("Broken sentence here. ")
