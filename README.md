@@ -247,7 +247,8 @@ for that chat. Without the widget, build the provider directly:
 | --- | --- |
 | `KokoroTTS.ENGINE_NAME` | `"kokoro"` |
 | `KokoroTTS.engine(context, options)` | the engine (a `LocalTTSEngine`), cached per options |
-| `KokoroOptions(baseUrl, voice, speed, cacheDirectory, autoDownload, numThreads)` | defaults: `KokoroTTS.DEFAULT_BASE_URL`, `"af_heart"`, `1.0`, `noBackupFilesDir/agent-kokoro`, `true`, `0` (ONNX Runtime default) |
+| `KokoroOptions(baseUrl, voice, speed, cacheDirectory, autoDownload, allowCellularDownload, numThreads)` | defaults: `KokoroTTS.DEFAULT_BASE_URL`, `"af_heart"`, `1.0`, `noBackupFilesDir/agent-kokoro`, `true`, `false`, `0` (ONNX Runtime default) |
+| `engine.allowCellularDownload` | runtime switch, starts as the option; set `true` then call `prepare()` to download on a metered network |
 | `suspend engine.prepare()` / `engine.prefetch()` | download + verify + load the configured voice; idempotent; `prefetch()` returns immediately |
 | `engine.state: StateFlow<KokoroState>` | `NotDownloaded`, `Downloading`, `Loading`, `Ready`, `Failed(error)` |
 | `engine.onModelProgress` / `engine.modelProgress` | callback / `StateFlow` of `KokoroModelProgress(state, fraction, bytesDownloaded, bytesTotal)` |
@@ -280,7 +281,19 @@ no identifiers. With `autoDownload = true` (default) the download starts in the
 background the first time Kokoro would speak or a reply starts; until it is
 ready, replies use the local-only Android system voice. Set it to `false` to
 download only when you call `prefetch()`/`prepare()` (e.g. after asking the
-user, or on Wi-Fi):
+user).
+
+**Not over cellular by default.** While the active network is metered
+(cellular, metered Wi-Fi, or unknown) and `allowCellularDownload` is `false`
+(default, as on iOS), nothing is fetched: `state` stays `NotDownloaded`, the
+system voice speaks, `prepare()` throws `KokoroAssetException` with reason
+`metered_network`, and the download starts by itself as soon as the device is
+on an unmetered network. To download anyway, set
+`engine.allowCellularDownload = true` (or the option) and call `prepare()`.
+A voice that is already downloaded loads and speaks on any network. This uses
+`ConnectivityManager`, so `agent-kokoro`'s manifest declares
+`ACCESS_NETWORK_STATE`, a normal permission granted at install (no prompt);
+`agent-frontend` itself declares no new permission.
 
 ```kotlin
 kokoro.onModelProgress = { p -> /* "Downloading voice… ${(p.fraction * 100).toInt()}%" */ }
@@ -342,8 +355,8 @@ permissive; there is no GPL, AGPL or LGPL code or data:
 
 ONNX Runtime is pinned to **1.28.0** on purpose: from 1.29 the Android AAR
 registers a `ContentProvider` that starts a Microsoft telemetry client (1DS) at
-app launch, reads device identifiers and adds `ACCESS_NETWORK_STATE`. 1.28.0
-has no such provider, permission or endpoint, and the engine also calls
+app launch and reads device identifiers. 1.28.0 has no such provider or
+endpoint (and declares no permissions), and the engine also calls
 `OrtEnvironment.setTelemetry(false)`. Re-check this before upgrading.
 Apps must include ONNX Runtime's MIT licence and its third-party notices in
 their open-source notices screen when they ship `agent-kokoro`; copies of both
@@ -450,7 +463,7 @@ The `:example` module is a manual scenario launcher for the chat widget. Open th
 **Optional on-device neural voice: Kokoro (`agent-kokoro`)**
 
 - **New optional artifact `agent-kokoro`** — `KokoroTTSProvider` speaks with Kokoro-82M v1.0 on the device: the Kokoro ONNX model on ONNX Runtime 1.28.0 (MIT) with our own Kotlin port of the English G2P (no espeak-ng or other GPL code). Apps that do not add it ship no native libraries. Engine name `"kokoro"`, the 28 English voice ids (`af_heart` default), assets and phonemes match iOS and web; the G2P passes all cross-platform golden vectors.
-- **Assets downloaded on demand, verified, resumable** — `KokoroTTSEngine` reads `manifest.json` from `KokoroOptions.baseUrl` (default: our public `kokoro/v1` folder), fetches only what the chosen voice and its language need (≈ 97.4 MB), checks size and SHA-256, caches by hash and resumes interrupted downloads. `prepare()` / `prefetch()`, `state`, `onModelProgress`, `voices()`, `deleteDownloadedModel()`, `downloadedBytes` and `onSpeechMetrics` (time to first audio) for hosts.
+- **Assets downloaded on demand, verified, resumable** — `KokoroTTSEngine` reads `manifest.json` from `KokoroOptions.baseUrl` (default: our public `kokoro/v1` folder), fetches only what the chosen voice and its language need (≈ 97.4 MB), checks size and SHA-256, caches by hash and resumes interrupted downloads. Not over metered networks unless `allowCellularDownload` (default `false`); it then starts by itself on an unmetered network. Adds the normal `ACCESS_NETWORK_STATE` permission. `prepare()` / `prefetch()`, `state`, `onModelProgress`, `voices()`, `deleteDownloadedModel()`, `downloadedBytes` and `onSpeechMetrics` (time to first audio) for hosts.
 - **Streams while it renders** — pieces of each sentence play on one `AudioTrack` as soon as each is rendered; the next sentence renders while the current one plays; cancellation is prompt; all work is off the main thread.
 - **Falls back to the local-only system voice** while the voice is missing, if the engine cannot load, or for the rest of a turn after a synthesis error — text never leaves the device; logs contain reason codes and timings only.
 - **`ChatWidgetConfig.localTtsEngine`** (new, default `null`) plugs an on-device engine into `VoiceFactory`'s local path (`KokoroTTS.engine(context)`); `VoiceProviderPlan.localEngine` reports it. When it stands in for an engine, `AndroidTTSProvider` is always local-only.

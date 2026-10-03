@@ -2,4 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Downloads the Kokoro asset files once (no text is ever sent). -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Normal (install-time) permission: lets the engine hold the ~97 MB
+         download back on metered networks and start it on an unmetered one
+         (KokoroOptions.allowCellularDownload). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 </manifest>

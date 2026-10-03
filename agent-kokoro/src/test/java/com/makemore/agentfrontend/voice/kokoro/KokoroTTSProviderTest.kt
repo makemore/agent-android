@@ -321,4 +321,23 @@ class KokoroTTSProviderTest {
         assertEquals(1, h.core.closed.get())
         assertTrue(h.audio.opened.get() > 0)
     }
+
+    @Test
+    fun `on a metered network the system voice speaks and the download waits for an unmetered one`() = runBlocking {
+        val network = FakeNetwork(metered = true)
+        val h = ProviderHarness(installed = false, network = network)
+        h.provider.speak("Hello.")
+        h.provider.onTurnStart()
+        h.provider.speak("Again.")
+        Thread.sleep(50)
+        assertEquals(listOf("Hello.", "Again."), h.fallback.spoken)
+        assertTrue(h.fetcher.requests.isEmpty())
+        assertEquals(KokoroState.NotDownloaded, h.engine.state.value)
+
+        network.becomeUnmetered()
+        eventually { h.engine.state.value == KokoroState.Ready }
+        h.provider.onTurnStart()
+        withTimeout(5_000) { h.provider.speak("Kokoro now.") }
+        assertEquals(listOf("Kokoro now."), h.core.calls.map { it.text })
+    }
 }

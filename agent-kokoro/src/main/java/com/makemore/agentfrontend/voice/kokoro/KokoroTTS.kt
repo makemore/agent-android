@@ -37,6 +37,14 @@ data class KokoroOptions(
      * or [KokoroTTSEngine.prepare].
      */
     val autoDownload: Boolean = true,
+    /**
+     * Allow the ~97 MB download on a metered network (cellular, metered
+     * Wi-Fi). Off by default: on a metered network the engine stays
+     * [KokoroState.NotDownloaded] (the system voice speaks) and starts the
+     * download by itself once the device is on an unmetered network. Can be
+     * changed at runtime with [KokoroTTSEngine.allowCellularDownload].
+     */
+    val allowCellularDownload: Boolean = false,
     /** ONNX Runtime intra-op threads for the Kokoro model; 0 = ONNX Runtime's default. */
     val numThreads: Int = 0,
 )
@@ -62,7 +70,9 @@ sealed interface KokoroState {
      * The last download or load failed. [error] is a value-free code:
      * `network`, `http_<status>`, `insecure_url`, `too_many_redirects`,
      * `checksum_mismatch`, `size_mismatch`, `insufficient_storage`,
-     * `invalid_manifest`, `unknown_voice`, `load_failed`, `io`.
+     * `invalid_manifest`, `unknown_voice`, `load_failed`, `io`. (A download
+     * held back on a metered network is not a failure: the state stays
+     * [NotDownloaded].)
      */
     data class Failed(val error: String) : KokoroState
 }
@@ -100,6 +110,7 @@ class KokoroTTSEngine internal constructor(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val loader: (KokoroLocalFiles, Int) -> KokoroEngineCore = { files, threads -> KokoroRuntime.load(files, threads) },
     private val clock: () -> Long = System::currentTimeMillis,
+    private val network: KokoroNetworkMonitor = KokoroNetworkMonitor.UNMETERED,
 ) : LocalTTSEngine {
     override val name: String = KokoroTTS.ENGINE_NAME
 
@@ -129,6 +140,15 @@ class KokoroTTSEngine internal constructor(
     // Guarded by [lock].
     private var runtime: KokoroEngineCore? = null
     private val inFlight = HashMap<String, Deferred<KokoroSynthesizer>>()
+    private val waitingForUnmetered = LinkedHashSet<String>()
+    private var unmeteredWatch: AutoCloseable? = null
+
+    /**
+     * Whether downloads may use a metered network. Starts as
+     * [KokoroOptions.allowCellularDownload]; set it to `true` (e.g. after asking
+     * the user) and call [prepare] to download now.
+     */
+    @Volatile var allowCellularDownload: Boolean = options.allowCellularDownload
     private var providers = 0
 
     /** Duration of the most recent engine load, in ms (0 if none yet). */
@@ -151,7 +171,10 @@ class KokoroTTSEngine internal constructor(
     /**
      * Download (if needed), verify and load the configured voice. Idempotent;
      * concurrent calls share the work. Throws [KokoroAssetException] on failure
-     * (also reported through [state]).
+     * (also reported through [state]). When files are missing, the network is
+     * metered and [allowCellularDownload] is false, nothing is fetched: it
+     * throws reason `metered_network`, [state] stays [KokoroState.NotDownloaded],
+     * and the download starts by itself on the next unmetered network.
      */
     suspend fun prepare() {
         synthesizerFor(voice)
@@ -244,6 +267,10 @@ class KokoroTTSEngine internal constructor(
     private suspend fun doPrepare(voice: KokoroVoice): KokoroSynthesizer {
         val tracked = voice.id == this.voice.id
         try {
+            if (!isDownloaded(voice) && !allowCellularDownload && network.isMetered()) {
+                waitForUnmetered(voice)
+                throw KokoroAssetException("metered_network", "waiting for an unmetered network")
+            }
             val manifest = store.manifest()
             val plan = try {
                 manifest.plan(voice.id, voice.language)
@@ -290,7 +317,11 @@ class KokoroTTSEngine internal constructor(
             if (tracked) setState(if (isDownloaded(voice)) KokoroState.Ready else KokoroState.NotDownloaded, 0f, 0, 0)
             throw e
         } catch (e: KokoroAssetException) {
-            fail(tracked, e.reason)
+            if (e.reason == METERED) {
+                if (tracked) setState(KokoroState.NotDownloaded, 0f, 0, 0)
+            } else {
+                fail(tracked, e.reason)
+            }
             throw e
         } catch (e: java.io.IOException) {
             fail(tracked, "network")
@@ -299,6 +330,23 @@ class KokoroTTSEngine internal constructor(
             fail(tracked, "io")
             throw KokoroAssetException("io", cause = e)
         }
+    }
+
+    /** Remember [voice] and prepare it once the default network is unmetered. */
+    private fun waitForUnmetered(voice: KokoroVoice) {
+        synchronized(lock) {
+            waitingForUnmetered += voice.id
+            if (unmeteredWatch != null) return
+            unmeteredWatch = network.whenUnmetered { scope.launch { onUnmetered() } }
+        }
+    }
+
+    private fun onUnmetered() {
+        val ids = synchronized(lock) {
+            unmeteredWatch = null
+            waitingForUnmetered.toList().also { waitingForUnmetered.clear() }
+        }
+        for (id in ids) KokoroVoices.find(id)?.let { startPrepare(it) }
     }
 
     private fun fail(tracked: Boolean, reason: String) {
@@ -331,6 +379,8 @@ class KokoroTTSEngine internal constructor(
  * kokoro.prefetch() // optional: download + load now, e.g. on Wi-Fi
  * ```
  */
+private const val METERED = "metered_network"
+
 object KokoroTTS {
     /** Engine id shared across platforms. */
     const val ENGINE_NAME = "kokoro"
@@ -348,7 +398,7 @@ object KokoroTTS {
             val resolved = options.copy(cacheDirectory = dir)
             engines.getOrPut(resolved) {
                 val store = stores.getOrPut(dir.path to options.baseUrl) { KokoroAssetStore(dir, options.baseUrl) }
-                KokoroTTSEngine(resolved, store)
+                KokoroTTSEngine(resolved, store, network = AndroidNetworkMonitor(context))
             }
         }
     }

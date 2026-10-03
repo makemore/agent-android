@@ -218,6 +218,26 @@ internal class FakeFallback : TTSProvider {
     }
 }
 
+/** A network whose meteredness the test controls; [becomeUnmetered] fires the waiting callbacks. */
+internal class FakeNetwork(@Volatile var metered: Boolean = false) : KokoroNetworkMonitor {
+    private val waiting = Collections.synchronizedList(mutableListOf<() -> Unit>())
+    val watches = AtomicInteger()
+
+    override fun isMetered(): Boolean = metered
+
+    override fun whenUnmetered(onUnmetered: () -> Unit): AutoCloseable {
+        watches.incrementAndGet()
+        waiting += onUnmetered
+        return AutoCloseable { waiting.remove(onUnmetered) }
+    }
+
+    fun becomeUnmetered() {
+        metered = false
+        val callbacks = synchronized(waiting) { waiting.toList().also { waiting.clear() } }
+        callbacks.forEach { it() }
+    }
+}
+
 /** An engine over [FakeFetcher] + [FakeCore]; [installed] pre-downloads [installedVoices]. */
 internal class EngineHarness(
     val dir: File = tempDir(),
@@ -228,6 +248,7 @@ internal class EngineHarness(
     val options: KokoroOptions = KokoroOptions(baseUrl = FakeFetcher.BASE),
     var now: Long = 0L,
     private val loadError: Throwable? = null,
+    val network: FakeNetwork = FakeNetwork(),
 ) {
     val store = KokoroAssetStore(dir, options.baseUrl, fetcher)
     val loads = AtomicInteger()
@@ -255,6 +276,7 @@ internal class EngineHarness(
             core
         },
         clock = { now },
+        network = network,
     )
 }
 
@@ -266,8 +288,12 @@ internal class ProviderHarness(
     options: KokoroOptions = KokoroOptions(baseUrl = FakeFetcher.BASE),
     voiceId: String? = null,
     loadError: Throwable? = null,
+    network: FakeNetwork = FakeNetwork(),
 ) {
-    val e = EngineHarness(installed = installed, installedVoices = installedVoices, fetcher = fetcher, core = core, options = options, loadError = loadError)
+    val e = EngineHarness(
+        installed = installed, installedVoices = installedVoices, fetcher = fetcher, core = core,
+        options = options, loadError = loadError, network = network,
+    )
     val engine get() = e.engine
     val fetcher get() = e.fetcher
     val core get() = e.core

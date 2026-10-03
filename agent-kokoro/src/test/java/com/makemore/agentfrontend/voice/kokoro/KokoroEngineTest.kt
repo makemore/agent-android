@@ -143,4 +143,54 @@ class KokoroEngineTest {
         assertEquals("en-gb", d.labels?.get("language"))
         assertEquals("true", d.labels?.get("suggested"))
     }
+
+    @Test
+    fun `metered network holds the download back until it is unmetered`() {
+        val h = EngineHarness(installed = false, network = FakeNetwork(metered = true))
+        val e = runCatching { runBlocking { h.engine.prepare() } }.exceptionOrNull()
+        assertEquals("metered_network", (e as KokoroAssetException).reason)
+        assertEquals(KokoroState.NotDownloaded, h.engine.state.value)
+        assertTrue("nothing fetched, not even the manifest", h.fetcher.requests.isEmpty())
+        h.engine.prefetch() // a second request waits on the same watch
+        Thread.sleep(50)
+        assertEquals(1, h.network.watches.get())
+        assertTrue(h.fetcher.requests.isEmpty())
+
+        h.network.becomeUnmetered()
+        eventually { h.engine.state.value == KokoroState.Ready }
+        assertEquals(listOf("en-us/af_heart"), h.core.ensured)
+        assertTrue(h.fetcher.paths().contains("model/kokoro-v1.0-q8.onnx"))
+    }
+
+    @Test
+    fun `allowCellularDownload lets the download use a metered network`() = runBlocking {
+        val h = EngineHarness(
+            installed = false,
+            network = FakeNetwork(metered = true),
+            options = KokoroOptions(baseUrl = FakeFetcher.BASE, allowCellularDownload = true),
+        )
+        h.engine.prepare()
+        assertEquals(KokoroState.Ready, h.engine.state.value)
+        assertEquals(0, h.network.watches.get())
+    }
+
+    @Test
+    fun `flipping allowCellularDownload and calling prepare downloads now`() = runBlocking {
+        val h = EngineHarness(installed = false, network = FakeNetwork(metered = true))
+        assertEquals(false, h.engine.allowCellularDownload)
+        runCatching { h.engine.prepare() }
+        assertTrue(h.fetcher.requests.isEmpty())
+        h.engine.allowCellularDownload = true
+        h.engine.prepare()
+        assertEquals(KokoroState.Ready, h.engine.state.value)
+    }
+
+    @Test
+    fun `a downloaded voice loads on a metered network without any request`() = runBlocking {
+        val h = EngineHarness(installed = true, network = FakeNetwork(metered = true))
+        h.engine.prepare()
+        assertEquals(KokoroState.Ready, h.engine.state.value)
+        assertTrue(h.fetcher.requests.isEmpty())
+        assertEquals(0, h.network.watches.get())
+    }
 }
