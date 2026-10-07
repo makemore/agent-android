@@ -185,7 +185,33 @@ class ChatViewModel(
     val responseStyle = mutableStateOf(ResponseStyle.NORMAL)
     val toolAccess = mutableStateOf(ToolAccess.AUTO)
     val researchEnabled = mutableStateOf(false)
+    /** The person's per-chat "Web" switch: off sends `params["web_search"] = false`. */
     val webSearchEnabled = mutableStateOf(true)
+
+    /**
+     * Whether the current agent can use the web: its own web access setting and the host's
+     * policy ([loadAgentFeatures]). The "Web" switch is shown only when true; false until the
+     * answer arrives and for hosts without the endpoint.
+     */
+    val webAccessAvailable = mutableStateOf(false)
+
+    /** Ask the runtime what the current agent's runs may use; call again when the agent changes. */
+    fun loadAgentFeatures() {
+        val key = effectiveAgentKey
+        viewModelScope.launch {
+            val available = try {
+                apiClient.loadAgentFeatures(key).webAccess
+            } catch (_: Exception) {
+                false
+            }
+            if (key == effectiveAgentKey) webAccessAvailable.value = available
+        }
+    }
+
+    private fun refreshAgentFeatures() {
+        webAccessAvailable.value = false
+        loadAgentFeatures()
+    }
 
     /** Persist the current [responseStyle]. Called from the picker. */
     fun setResponseStyle(value: ResponseStyle) {
@@ -873,7 +899,10 @@ class ChatViewModel(
         selectedSystemVersionId.value = activeVersionId
         storage.set(config.systemVersionIdKey, activeVersionId)
 
-        if (previousSlug != system.slug) clearMessages()
+        if (previousSlug != system.slug) {
+            clearMessages()
+            refreshAgentFeatures()
+        }
     }
 
     /** Select a specific version of the current system */
@@ -893,6 +922,7 @@ class ChatViewModel(
         storage.set(config.systemKey, null)
         storage.set(config.systemVersionKey, null)
         storage.set(config.systemVersionIdKey, null)
+        refreshAgentFeatures()
     }
 
     // -- Model Picker --

@@ -458,6 +458,14 @@ The `:example` module is a manual scenario launcher for the chat widget. Open th
 
 ## Changelog
 
+### Unreleased
+
+- **Web access.** `ChatViewModel.webAccessAvailable` comes from the runtime's new
+  `GET runs/features/?agent_key=` (`APIClient.loadAgentFeatures`, `AgentFeatures` in agent-client): the agent's own
+  web access setting and the host's policy (agent_runtime_core.web_access). The Add to chat "Web"
+  switch (was "Web search") shows only when it is true and is reloaded when the agent changes;
+  turning it off still sends `params["web_search"] = false`.
+
 ### 3.1.0
 
 **Optional on-device neural voice: Kokoro (`agent-kokoro`)**

@@ -44,6 +44,17 @@ data class ModelsResponse(
     val default: String? = null,
 )
 
+/**
+ * What an agent's runs may use (`GET runs/features/?agent_key=`).
+ * [webAccess]: the agent has web access and the host allows it. The per-chat "Web" switch is
+ * shown only then; turning it off sends `params["web_search"] = false`.
+ */
+@Serializable
+data class AgentFeatures(
+    @SerialName("agent_key") val agentKey: String,
+    @SerialName("web_access") val webAccess: Boolean = false,
+)
+
 /** Task item */
 @Serializable
 data class TaskItem(

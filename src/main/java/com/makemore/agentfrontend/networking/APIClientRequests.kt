@@ -202,6 +202,26 @@ suspend fun APIClient.loadSystems(): List<AgentSystem> = withContext(Dispatchers
     }
 }
 
+// -- Agent features --
+
+/**
+ * What [agentKey]'s runs may use, from the runtime's `runs/features/` endpoint. `webAccess` is
+ * the agent's web access setting and the host's policy together (agent_runtime_core.web_access);
+ * the "Web" switch is offered only when it is true.
+ */
+suspend fun APIClient.loadAgentFeatures(agentKey: String): AgentFeatures = withContext(Dispatchers.IO) {
+    val token = getOrCreateSession()
+    val path = "${config.apiPaths.runs}features/?agent_key=${URLEncoder.encode(agentKey, "UTF-8")}"
+    val request = buildRequest(path, "GET", token = token)
+
+    val response = httpClient.newCall(request).await()
+    response.use {
+        if (it.code == 401 || it.code == 403) throw Unauthorized
+        if (it.code !in 200..299) throw HttpError(it.code)
+        json.decodeFromString<AgentFeatures>(it.body?.string() ?: throw InvalidResponse)
+    }
+}
+
 // -- Models --
 
 /**

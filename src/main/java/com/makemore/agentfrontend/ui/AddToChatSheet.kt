@@ -298,7 +298,7 @@ private fun TogglesCard(
     // Fallback state used only when no ChatViewModel is wired (e.g.
     // previews). Mirrors the iOS sheet's behaviour.
     var fallbackResearch by remember { mutableStateOf(false) }
-    var fallbackWebSearch by remember { mutableStateOf(true) }
+    val fallbackWebSearch = true
 
     val research = viewModel?.researchEnabled?.value ?: fallbackResearch
     val webSearch = viewModel?.webSearchEnabled?.value ?: fallbackWebSearch
@@ -312,9 +312,12 @@ private fun TogglesCard(
         ToggleRow(config, icon = Icons.Outlined.Search, label = "Research", checked = research) {
             if (viewModel != null) viewModel.setResearchEnabled(it) else fallbackResearch = it
         }
-        RowDivider(config)
-        ToggleRow(config, icon = Icons.Outlined.Language, label = "Web search", checked = webSearch) {
-            if (viewModel != null) viewModel.setWebSearchEnabled(it) else fallbackWebSearch = it
+        // Only for agents that can use the web (their setting and the host's policy).
+        if (viewModel?.webAccessAvailable?.value == true) {
+            RowDivider(config)
+            ToggleRow(config, icon = Icons.Outlined.Language, label = "Web", checked = webSearch) {
+                viewModel.setWebSearchEnabled(it)
+            }
         }
     }
 }

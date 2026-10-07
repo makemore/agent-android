@@ -102,6 +102,7 @@ fun ChatWidgetView(
         if (config.showSystemPicker) {
             viewModel.loadSystems()
         }
+        viewModel.loadAgentFeatures()
     }
 
     val focusManager = LocalFocusManager.current
