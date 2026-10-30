@@ -66,7 +66,7 @@ class ChatViewModel(
     val attachments = AttachmentStager(
         scope = viewModelScope,
         enabled = { config.apiPaths.attachmentsEnabled },
-        upload = { data, name, type, progress -> apiClient.uploadAttachment(data, name, type, progress) },
+        upload = { file, name, type, progress -> apiClient.uploadAttachment(file, name, type, progress) },
     )
 
     /** Transient "what the sub-agents are doing right now" state. Driven
@@ -466,6 +466,16 @@ class ChatViewModel(
     // -- Send Message --
 
     /**
+     * Whether a send of [content] and [files] would be taken right now. The composer asks before
+     * it clears its text and staged files, so a refused send loses neither.
+     */
+    fun canAcceptSend(content: String, files: List<FileAttachment> = emptyList()): Boolean =
+        foreground && owns(operationGeneration) && !isLoading.value && pendingStore.load() == null &&
+            (content.trim().isNotEmpty() || files.isNotEmpty()) &&
+            files.size <= AttachmentLimits.MAX_PER_MESSAGE &&
+            (files.all { it.attachmentId != null } || (apiClient.attachmentsEnabled && attachments.available))
+
+    /**
      * Fire-and-forget send. Compose-friendly: callable directly from a
      * button `onClick`. The launched coroutine awaits the full SSE stream
      * before returning, so subsequent calls from inside a single launched
@@ -558,6 +568,8 @@ class ChatViewModel(
             }
         }
         val attachmentIds = sendFiles.mapNotNull { it.attachmentId }
+        // Accepted: the staged files that go with this message leave the composer.
+        attachments.removeUploaded(attachmentIds.toSet())
 
         // New turn — drop any half-spoken audio from the previous assistant
         // response and clear the chunker's buffer.
@@ -1161,9 +1173,10 @@ class ChatViewModel(
         if (!canSupersedeLoadedHistory()) return
         if (messages[index].role != MessageRole.USER) return
 
-        // Truncate
+        // Truncate; the edited turn keeps its files.
+        val files = messages[index].files.orEmpty()
         while (messages.size > index) messages.removeAt(messages.size - 1)
-        sendMessage(newContent, model = model, thinking = thinking, supersedeFromMessageIndex = index)
+        sendMessage(newContent, files, model = model, thinking = thinking, supersedeFromMessageIndex = index)
     }
 
     /** Retry from a specific message */
@@ -1188,8 +1201,9 @@ class ChatViewModel(
             if (userMessage.role != MessageRole.USER) return
         } else if (messageAtIndex.role != MessageRole.USER) return
 
+        val files = userMessage.files.orEmpty()
         while (messages.size > userMessageIndex) messages.removeAt(messages.size - 1)
-        sendMessage(userMessage.content, model = model, thinking = thinking, supersedeFromMessageIndex = userMessageIndex)
+        sendMessage(userMessage.content, files, model = model, thinking = thinking, supersedeFromMessageIndex = userMessageIndex)
     }
 
     private fun canSupersedeLoadedHistory(): Boolean {
@@ -2320,6 +2334,7 @@ class ChatViewModel(
      */
     override fun onCleared() {
         super.onCleared()
+        attachments.clear()
         onBackground()
     }
 }

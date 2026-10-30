@@ -16,8 +16,13 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.UUID
 
-/** A file ready to stage: already read (and, for photos, prepared) off the main thread. */
-class AttachmentInput(val name: String, val contentType: String, val data: ByteArray)
+/**
+ * A file ready to stage: copied into the app's cache (and, for photos, prepared) off the main
+ * thread. The upload streams from [file]; it is deleted after the upload and on removal.
+ */
+class AttachmentInput(val name: String, val contentType: String, val file: java.io.File) {
+    val size: Long get() = file.length()
+}
 
 /** One staged file in the composer: uploading with progress, uploaded, or failed. */
 class StagedAttachment(
@@ -25,7 +30,7 @@ class StagedAttachment(
     val name: String,
     val contentType: String,
     val size: Long,
-    internal val data: ByteArray,
+    internal val file: java.io.File,
 ) {
     sealed class Status {
         data class Uploading(val progress: Double) : Status()
@@ -46,7 +51,7 @@ class StagedAttachment(
 class AttachmentStager(
     private val scope: CoroutineScope,
     private val enabled: () -> Boolean,
-    private val upload: suspend (data: ByteArray, name: String, type: String, progress: (Double) -> Unit) -> UploadedAttachment,
+    private val upload: suspend (file: java.io.File, name: String, type: String, progress: (Double) -> Unit) -> UploadedAttachment,
 ) {
     val items = mutableStateListOf<StagedAttachment>()
 
@@ -75,13 +80,14 @@ class AttachmentStager(
                 break
             }
             val cap = if (AttachmentLimits.isImage(input.contentType)) AttachmentLimits.MAX_PHOTO_BYTES else AttachmentLimits.MAX_FILE_BYTES
-            if (input.data.size > cap) {
+            if (input.size > cap) {
+                input.file.delete()
                 message = "${input.name} is too large (up to ${cap / (1024 * 1024)} MB)."
                 continue
             }
             val staged = StagedAttachment(
                 name = input.name, contentType = input.contentType,
-                size = input.data.size.toLong(), data = input.data,
+                size = input.size, file = input.file,
             )
             items.add(staged)
             start(staged)
@@ -92,6 +98,7 @@ class AttachmentStager(
     fun remove(localId: String) {
         items.firstOrNull { it.localId == localId }?.let {
             it.job?.cancel()
+            it.file.delete()
             items.remove(it)
         }
     }
@@ -107,10 +114,13 @@ class AttachmentStager(
         staged.job = scope.launch {
             try {
                 val uploaded = gate.withPermit {
-                    upload(staged.data, staged.name, staged.contentType) { p ->
+                    // Removed while it waited for a slot: never start.
+                    if (staged !in items) throw CancellationException("removed")
+                    upload(staged.file, staged.name, staged.contentType) { p ->
                         staged.status = StagedAttachment.Status.Uploading(p)
                     }
                 }
+                staged.file.delete()
                 staged.status = StagedAttachment.Status.Done(uploaded)
             } catch (e: CancellationException) {
                 throw e
@@ -139,14 +149,14 @@ class AttachmentStager(
         }
     }
 
-    /** Forget the uploaded files (after a send); failed ones stay so they are not lost silently. */
-    fun clearUploaded() {
-        items.removeAll { it.status is StagedAttachment.Status.Done }
+    /** Forget the uploaded files with these ids (once a send is accepted); others stay. */
+    fun removeUploaded(ids: Set<String>) {
+        items.removeAll { (it.status as? StagedAttachment.Status.Done)?.uploaded?.id in ids }
     }
 
-    /** Forget everything staged. */
+    /** Forget everything staged and delete the copies. */
     fun clear() {
-        items.forEach { it.job?.cancel() }
+        items.forEach { it.job?.cancel(); it.file.delete() }
         items.clear()
     }
 }

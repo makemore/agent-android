@@ -242,43 +242,48 @@ fun InputView(
         if (!granted) startDictationOnGrant = false
     }
 
-    // Stage picked files: read off the main thread (refusing over-limit files before
-    // reading), prepare photos, then upload each straight away.
-    fun stagePicked(read: suspend () -> List<PickedFile>) {
+    // Stage picked files: the count is checked first, then each is copied to the cache off the
+    // main thread (over-limit ones refused), photos prepared, and each uploaded straight away.
+    fun stagePicked(uris: List<Uri>) {
         val target = stager ?: return
         coroutineScope.launch {
-            val picked = read()
-            attachmentNotice = picked.filterIsInstance<PickedFile.Refused>().lastOrNull()?.message
-            val refused = target.add(picked.filterIsInstance<PickedFile.Ready>().map { it.input })
-            if (refused != null) attachmentNotice = refused
+            val (ready, notice) = AttachmentReader.readAll(
+                context, uris, AttachmentLimits.MAX_PER_MESSAGE - target.items.size,
+            )
+            attachmentNotice = notice
+            target.add(ready)?.let { attachmentNotice = it }
         }
     }
 
     // Camera capture — TakePicturePreview returns a thumbnail Bitmap
-    // which we re-encode as JPEG and stage like any picked file.
+    // which we write as a JPEG and stage like any picked file.
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicturePreview()
     ) { bitmap: Bitmap? ->
-        if (bitmap != null) stagePicked {
-            listOf(AttachmentReader.fromBitmap(bitmap, "camera-${System.currentTimeMillis() / 1000}.jpg"))
+        val target = stager
+        if (bitmap != null && target != null) {
+            if (target.items.size >= AttachmentLimits.MAX_PER_MESSAGE) {
+                attachmentNotice = "You can attach up to ${AttachmentLimits.MAX_PER_MESSAGE} files to one message."
+            } else coroutineScope.launch {
+                when (val r = AttachmentReader.fromBitmap(context, bitmap, "camera-${System.currentTimeMillis() / 1000}.jpg")) {
+                    is PickedFile.Ready -> target.add(listOf(r.input))
+                    is PickedFile.Refused -> attachmentNotice = r.message
+                }
+            }
         }
     }
 
     // Photo picker: permission-free, many photos at once.
     val photoPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris: List<Uri> ->
-        if (uris.isNotEmpty()) stagePicked { uris.map { AttachmentReader.read(context, it) } }
-    }
+    ) { uris: List<Uri> -> if (uris.isNotEmpty()) stagePicked(uris) }
 
     // System document picker. OpenMultipleDocuments is permission-free
     // (the picker UI runs in a separate process and returns content://
     // URIs the host can read).
     val documentPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
-    ) { uris: List<Uri> ->
-        if (uris.isNotEmpty()) stagePicked { uris.map { AttachmentReader.read(context, it) } }
-    }
+    ) { uris: List<Uri> -> if (uris.isNotEmpty()) stagePicked(uris) }
 
     val effectiveSpeechInputPolicy = config.effectiveSpeechInputPolicy
     val speechInputAvailable = config.enableVoice && when (effectiveSpeechInputPolicy) {
@@ -386,9 +391,10 @@ fun InputView(
         cancelSilenceTimer()
         val textToSend = inputTextState.value
         val filesToSend = stager?.uploadedFiles().orEmpty()
+        // A refused send (a reply in flight, a pending recovery) keeps the text and the files.
+        // Accepted files leave the composer in the view model; failed ones stay, red, with retry.
+        if (viewModel != null && !viewModel.canAcceptSend(textToSend, filesToSend)) return
         inputTextState.value = ""
-        // Failed files stay in the composer (red, with retry) rather than vanishing.
-        stager?.clearUploaded()
         if (isRecordingState.value) {
             // Continuous voice mode: keep the recognizer alive, just
             // recycle so the next utterance starts fresh.

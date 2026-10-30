@@ -62,6 +62,7 @@ class AttachmentsTest {
 
     private fun bodyOf(request: Request) = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
 
+    private val listShape = """{"attachments":[{"attachment_id":"abc","name":"notes.txt","size":5,"content_type":"text/plain","created_at":"2026-10-30T10:00:00Z"}]}"""
     private val uploaded = """{"id":"11111111-1111-1111-1111-111111111111","name":"notes.txt","content_type":"text/plain","size":5}"""
 
     // -- upload request shape --
@@ -111,19 +112,24 @@ class AttachmentsTest {
         val paths = mutableListOf<String>()
         val api = APIClient(withPath, storage, http { r ->
             paths.add(r.url.encodedPath)
-            if (r.url.encodedPath.endsWith("/attachments/")) json(r, "[$uploaded]") else json(r, "bytes")
+            if (r.url.encodedPath.endsWith("/attachments/")) json(r, listShape) else json(r, "bytes")
         })
-        assertEquals("notes.txt", api.listAttachments().single().name)
+        val listed = api.listAttachments().single()
+        assertEquals("abc", listed.id)
+        assertEquals("notes.txt", listed.name)
+        assertEquals("text/plain", listed.contentType)
         assertEquals("bytes", String(api.fetchAttachment("abc")))
         assertEquals(listOf("/api/threads/t1/attachments/", "/api/threads/t1/attachments/abc/"), paths)
     }
 
     // -- limits and concurrency --
 
-    private fun stager(upload: suspend (ByteArray, String, String, (Double) -> Unit) -> UploadedAttachment) =
+    private val temp = java.nio.file.Files.createTempDirectory("att").toFile()
+    private fun stager(upload: suspend (java.io.File, String, String, (Double) -> Unit) -> UploadedAttachment) =
         AttachmentStager(CoroutineScope(main + SupervisorJob()), { true }, upload)
 
-    private fun input(i: Int, size: Int = 3) = AttachmentInput("f$i.txt", "text/plain", ByteArray(size))
+    private fun input(i: Int, size: Int = 3) =
+        AttachmentInput("f$i.txt", "text/plain", java.io.File(temp, "f$i-${System.nanoTime()}").apply { writeBytes(ByteArray(size)) })
     private fun ok(name: String) = UploadedAttachment("id-$name", name, "text/plain", 3)
 
     @Test fun limitOfTwentyWithAClearMessage() = runBlocking(main) {
@@ -137,9 +143,12 @@ class AttachmentsTest {
 
     @Test fun overLimitFileIsRefusedBeforeStaging() = runBlocking(main) {
         val s = stager { _, name, _, _ -> ok(name) }
-        val message = s.add(listOf(AttachmentInput("photo.jpg", "image/jpeg", ByteArray(20 * 1024 * 1024 + 1))))
+        val big = java.io.File(temp, "photo.jpg")
+        java.io.RandomAccessFile(big, "rw").use { it.setLength(20L * 1024 * 1024 + 1) }
+        val message = s.add(listOf(AttachmentInput("photo.jpg", "image/jpeg", big)))
         assertTrue(message!!.contains("too large"))
         assertTrue(s.items.isEmpty())
+        assertFalse(big.exists())
     }
 
     @Test fun atMostThreeUploadsAtOnceAndEachFailsOnItsOwn() = runBlocking(main) {
@@ -251,5 +260,88 @@ class AttachmentsTest {
         assertTrue(AttachmentLimits.photoNeedsReencode("image/heic", 1_000, 100, 100))
         assertTrue(AttachmentLimits.photoNeedsReencode("image/png", 21L * 1024 * 1024, 100, 100))
         assertEquals(4096 to 2048, AttachmentLimits.scaledPhotoSize(8192, 4096))
+    }
+
+    @Test fun fileUploadStreamsFromDiskWithTheFileField() = runBlocking(main) {
+        var body = ""
+        val api = APIClient(withPath, storage, http { r -> body = bodyOf(r); json(r, uploaded, 201) })
+        val f = java.io.File(temp, "doc.txt").apply { writeText("from disk") }
+        assertEquals("11111111-1111-1111-1111-111111111111", api.uploadAttachment(f, "doc.txt", "text/plain").id)
+        assertTrue(body.contains("""name="file"; filename="doc.txt""""))
+        assertTrue(body.contains("from disk"))
+    }
+
+    @Test fun removedQueuedFileNeverUploadsAndItsCopyIsDeleted() = runBlocking(main) {
+        val gate = CompletableDeferred<Unit>()
+        val names = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val s = stager { _, name, _, _ -> names.add(name); gate.await(); ok(name) }
+        val inputs = (1..5).map { input(it) }
+        s.add(inputs)
+        delay(100)
+        val queued = s.items[3]
+        s.remove(queued.localId)
+        gate.complete(Unit)
+        s.awaitIdle()
+        assertFalse(names.contains("f4.txt"))
+        assertEquals(4, names.size)
+        assertFalse(inputs[3].file.exists())
+        assertFalse("uploaded copies are deleted", inputs[0].file.exists())
+    }
+
+    private fun sendingVm(bodies: MutableList<String>) = vm(withPath) { r ->
+        if (r.method == "POST" && r.url.encodedPath.endsWith("/attachments/")) {
+            val n = Regex("filename=\"([^\"]+)\"").find(bodyOf(r))!!.groupValues[1]
+            json(r, """{"id":"id-$n","name":"$n","content_type":"text/plain","size":3}""", 201)
+        } else if (r.method == "POST") { bodies.add(bodyOf(r)); json(r, """{"id":"run-${bodies.size}"}""", 201) }
+        else sse(r, "event: assistant.message\ndata: {\"payload\":{\"content\":\"ok\"}}\n\nevent: run.succeeded\ndata: {\"payload\":{}}\n\n")
+    }
+
+    private suspend fun waitForPosts(bodies: List<String>, n: Int) = withTimeout(5_000) { while (bodies.size < n) delay(20) }
+
+    @Test fun editAndRetryKeepTheMessagesFiles() = runBlocking(main) {
+        val bodies = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val vm = sendingVm(bodies)
+        val file = FileAttachment(name = "a.txt", size = 1, type = "text/plain", attachmentId = "att-9")
+        withTimeout(5_000) { vm.sendMessageAndAwait("", listOf(file)) }
+        vm.editMessage(0, "")
+        waitForPosts(bodies, 2)
+        fun ids(i: Int) = JSONObject(bodies[i]).getJSONArray("messages").getJSONObject(0).getJSONArray("attachment_ids").getString(0)
+        assertEquals("att-9", ids(1))
+        assertEquals("", JSONObject(bodies[1]).getJSONArray("messages").getJSONObject(0).getString("content"))
+        withTimeout(5_000) { while (vm.isLoading.value) delay(20) }
+        vm.retryMessage(0)
+        waitForPosts(bodies, 3)
+        assertEquals("att-9", ids(2))
+        assertEquals(1, vm.messages.count { it.role == MessageRole.USER })
+    }
+
+    @Test fun acceptedSendClearsOnlyTheFilesSentAndRefusedSendClearsNothing() = runBlocking(main) {
+        val bodies = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val vm = sendingVm(bodies)
+        val one = FileAttachment(name = "a.txt", size = 1, type = "text/plain", attachmentId = "att-1")
+        assertFalse("empty", vm.canAcceptSend("  ", emptyList()))
+        assertTrue(vm.canAcceptSend("", listOf(one)))
+        assertFalse("no path, unsent file", vmNoPath().canAcceptSend("x", listOf(FileAttachment(name = "b", size = 1, type = "t", data = ByteArray(1)))))
+        vm.isLoading.value = true
+        assertFalse("reply in flight", vm.canAcceptSend("hello", listOf(one)))
+        assertTrue(bodies.isEmpty())
+        vm.isLoading.value = false
+
+        vm.attachments.add(listOf(input(1), input(2)))
+        vm.attachments.awaitIdle()
+        val staged = vm.attachments.uploadedFiles()
+        assertEquals(2, staged.size)
+        // Only the first file goes with this message: the second stays staged.
+        withTimeout(5_000) { vm.sendMessageAndAwait("", staged.take(1)) }
+        assertEquals(1, bodies.size)
+        assertEquals(1, vm.attachments.items.size)
+    }
+
+    private fun vmNoPath() = vm(withoutPath) { error("must not call") }
+
+    @Test fun listResponseWithoutAttachmentsKeyIsAnError() = runBlocking(main) {
+        val api = APIClient(withPath, storage, http { r -> json(r, """{"results":[]}""") })
+        try { api.listAttachments(); fail() } catch (e: APIError) {}
+        Unit
     }
 }

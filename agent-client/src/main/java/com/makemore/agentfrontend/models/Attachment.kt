@@ -11,7 +11,8 @@ import kotlinx.serialization.json.JsonNames
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class UploadedAttachment(
-    val id: String,
+    // POST answers `id`; the list answers `attachment_id`.
+    @JsonNames("attachment_id") val id: String,
     val name: String = "Attachment",
     @JsonNames("content_type") val contentType: String = "application/octet-stream",
     val size: Long = 0,

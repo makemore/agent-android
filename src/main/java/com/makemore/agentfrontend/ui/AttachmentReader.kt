@@ -11,8 +11,9 @@ import com.makemore.agentfrontend.models.AttachmentLimits
 import com.makemore.agentfrontend.viewmodels.AttachmentInput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 
 /** Outcome of reading a picked file: the file to stage, or why it was refused. */
 sealed class PickedFile {
@@ -21,13 +22,48 @@ sealed class PickedFile {
 }
 
 /**
- * Reads picked content:// files for upload, always off the main thread. A file over the limit is
- * refused from its declared size before any bytes are read (and while reading when the size is
- * unknown), so a huge file never fills memory. Photos are prepared like the web client's
- * `preparePhoto`: re-encoded as JPEG, longest side <= 4096, EXIF orientation applied, when
- * too big or not png/jpeg/gif/webp.
+ * Copies picked content:// files into the app's cache, off the main thread, so no file is ever
+ * held whole in memory: the upload streams from the copy, which is deleted after the upload
+ * and when the file is removed. The count is checked before anything is copied; a file over
+ * the limit is refused from its declared size, or while copying when that is unknown. Photos
+ * are prepared like the web client's `preparePhoto` (JPEG, longest side <= 4096, EXIF
+ * orientation applied) when too big or not png/jpeg/gif/webp, decoding from the file with a
+ * sample size so the decode is bounded.
  */
 object AttachmentReader {
+
+    fun stagingDir(context: Context): File = File(context.cacheDir, "upload-staging").apply { mkdirs() }
+
+    /** Removes every staged copy (sign-out; app start, when no upload can still be running). */
+    fun clearStaging(context: Context) {
+        File(context.cacheDir, "upload-staging").deleteRecursively()
+    }
+
+    /**
+     * Copies up to [remaining] of the picked files; returns the files to stage and the last
+     * refusal worth telling the person.
+     */
+    suspend fun readAll(context: Context, uris: List<Uri>, remaining: Int): Pair<List<AttachmentInput>, String?> {
+        var notice: String? = null
+        val take = uris.take(maxOf(0, remaining))
+        if (take.size < uris.size) notice = "You can attach up to ${AttachmentLimits.MAX_PER_MESSAGE} files to one message."
+        val ready = mutableListOf<AttachmentInput>()
+        for (uri in take) {
+            when (val r = read(context, uri)) {
+                is PickedFile.Ready -> ready += r.input
+                is PickedFile.Refused -> notice = r.message
+            }
+        }
+        return ready to notice
+    }
+
+    /** Camera preview bitmap: written as a JPEG in the staging dir, never held as bytes. */
+    suspend fun fromBitmap(context: Context, bitmap: Bitmap, name: String): PickedFile = withContext(Dispatchers.IO) {
+        val out = File.createTempFile("camera-", ".jpg", stagingDir(context))
+        val ok = FileOutputStream(out).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        if (ok) PickedFile.Ready(AttachmentInput(name, "image/jpeg", out))
+        else PickedFile.Refused("$name couldn't be read.").also { out.delete() }
+    }
 
     suspend fun read(context: Context, uri: Uri): PickedFile = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
@@ -45,64 +81,70 @@ object AttachmentReader {
             }
         }
         val name = displayName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
-        val limit = AttachmentLimits.MAX_FILE_BYTES
-        // Photos may shrink on re-encode, so only the file limit applies to the raw bytes.
-        if ((declaredSize ?: 0L) > limit) return@withContext PickedFile.Refused(tooLarge(name))
-        val bytes = runCatching {
-            resolver.openInputStream(uri)?.use { readCapped(it, limit) }
-        }.getOrNull() ?: return@withContext PickedFile.Refused("$name couldn't be read.")
-        if (bytes.size.toLong() > limit) return@withContext PickedFile.Refused(tooLarge(name))
-        prepare(name, mime, bytes)
+        // Photos may shrink on re-encode, so only the file limit applies to the raw copy.
+        if ((declaredSize ?: 0L) > AttachmentLimits.MAX_FILE_BYTES) return@withContext PickedFile.Refused(tooLarge(name))
+        val copy = File.createTempFile("pick-", ".bin", stagingDir(context))
+        try {
+            val within = resolver.openInputStream(uri)?.use { copyCapped(it, copy, AttachmentLimits.MAX_FILE_BYTES) }
+                ?: return@withContext PickedFile.Refused("$name couldn't be read.").also { copy.delete() }
+            if (!within) return@withContext PickedFile.Refused(tooLarge(name)).also { copy.delete() }
+            prepare(context, name, mime, copy)
+        } catch (e: Exception) {
+            copy.delete()
+            PickedFile.Refused("$name couldn't be read.")
+        } catch (e: OutOfMemoryError) {
+            copy.delete()
+            PickedFile.Refused("$name is too large to prepare on this phone.")
+        }
     }
 
-    /** Camera / bitmap source: always a fresh JPEG. */
-    suspend fun fromBitmap(bitmap: Bitmap, name: String): PickedFile = withContext(Dispatchers.IO) {
-        val out = ByteArrayOutputStream()
-        if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)) PickedFile.Refused("$name couldn't be read.")
-        else PickedFile.Ready(AttachmentInput(name, "image/jpeg", out.toByteArray()))
-    }
-
-    internal fun prepare(name: String, mime: String, bytes: ByteArray): PickedFile {
-        if (!AttachmentLimits.isImage(mime)) return PickedFile.Ready(AttachmentInput(name, mime, bytes))
+    /** Takes ownership of [copy]: it is returned inside the result, or deleted. */
+    internal fun prepare(context: Context, name: String, mime: String, copy: File): PickedFile {
+        if (!AttachmentLimits.isImage(mime)) return PickedFile.Ready(AttachmentInput(name, mime, copy))
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        BitmapFactory.decodeFile(copy.path, bounds)
         val w = bounds.outWidth
         val h = bounds.outHeight
         // Not decodable here (e.g. svg): leave it as it is.
-        if (w <= 0 || h <= 0) return PickedFile.Ready(AttachmentInput(name, mime, bytes))
-        if (!AttachmentLimits.photoNeedsReencode(mime, bytes.size.toLong(), w, h)) {
-            return PickedFile.Ready(AttachmentInput(name, mime, bytes))
+        if (w <= 0 || h <= 0 || !AttachmentLimits.photoNeedsReencode(mime, copy.length(), w, h)) {
+            return PickedFile.Ready(AttachmentInput(name, mime, copy))
         }
-        val reencoded = reencode(bytes, w, h) ?: return PickedFile.Refused("$name couldn't be read as a photo.")
-        if (reencoded.size > AttachmentLimits.MAX_PHOTO_BYTES) return PickedFile.Refused(tooLarge(name))
-        val jpegName = name.substringBeforeLast('.', name) + ".jpg"
-        return PickedFile.Ready(AttachmentInput(jpegName, "image/jpeg", reencoded))
+        val out = File.createTempFile("photo-", ".jpg", stagingDir(context))
+        val ok = try { reencode(copy, out, w, h) } catch (e: Throwable) { false }
+        copy.delete()
+        if (!ok) {
+            out.delete()
+            return PickedFile.Refused("$name couldn't be read as a photo.")
+        }
+        if (out.length() > AttachmentLimits.MAX_PHOTO_BYTES) {
+            out.delete()
+            return PickedFile.Refused(tooLarge(name))
+        }
+        return PickedFile.Ready(AttachmentInput(name.substringBeforeLast('.', name) + ".jpg", "image/jpeg", out))
     }
 
-    private fun reencode(bytes: ByteArray, w: Int, h: Int): ByteArray? {
+    private fun reencode(src: File, dst: File, w: Int, h: Int): Boolean {
         val (tw, th) = AttachmentLimits.scaledPhotoSize(w, h)
         var sample = 1
         while (w / (sample * 2) >= tw && h / (sample * 2) >= th) sample *= 2
-        val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
-            ?: return null
+        val decoded = BitmapFactory.decodeFile(src.path, BitmapFactory.Options().apply { inSampleSize = sample }) ?: return false
         val matrix = Matrix()
-        orientationMatrix(bytes, matrix)
+        orientationMatrix(src, matrix)
         val scale = minOf(1f, AttachmentLimits.MAX_PHOTO_SIDE.toFloat() / maxOf(decoded.width, decoded.height))
         if (scale < 1f) matrix.postScale(scale, scale)
-        val final = if (matrix.isIdentity) decoded
-        else Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        val final = if (matrix.isIdentity) decoded else Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
         var quality = 90
         while (true) {
-            val out = ByteArrayOutputStream()
-            if (!final.compress(Bitmap.CompressFormat.JPEG, quality, out)) return null
-            if (out.size() <= AttachmentLimits.MAX_PHOTO_BYTES || quality <= 50) return out.toByteArray()
+            val done = FileOutputStream(dst).use { final.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+            if (!done) return false
+            if (dst.length() <= AttachmentLimits.MAX_PHOTO_BYTES || quality <= 50) return true
             quality -= 10
         }
     }
 
-    private fun orientationMatrix(bytes: ByteArray, m: Matrix) {
+    private fun orientationMatrix(file: File, m: Matrix) {
         val orientation = runCatching {
-            ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            ExifInterface(file.path).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
         }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
         when (orientation) {
             ExifInterface.ORIENTATION_ROTATE_90 -> m.postRotate(90f)
@@ -115,19 +157,20 @@ object AttachmentReader {
         }
     }
 
-    /** Reads at most [limit] + 1 bytes, so an unknown-size file over the limit stops early. */
-    private fun readCapped(input: java.io.InputStream, limit: Long): ByteArray {
-        val out = ByteArrayOutputStream()
+    /** Copies at most [limit] bytes; false when the source is longer. */
+    private fun copyCapped(input: InputStream, dst: File, limit: Long): Boolean {
         val buf = ByteArray(64 * 1024)
         var total = 0L
-        while (true) {
-            val n = input.read(buf)
-            if (n < 0) break
-            out.write(buf, 0, n)
-            total += n
-            if (total > limit) break
+        FileOutputStream(dst).use { out ->
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > limit) return false
+                out.write(buf, 0, n)
+            }
         }
-        return out.toByteArray()
+        return true
     }
 
     private fun tooLarge(name: String) =
