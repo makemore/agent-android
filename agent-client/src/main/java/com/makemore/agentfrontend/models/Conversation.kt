@@ -52,10 +52,13 @@ data class APIMessage(
  * `ContentBlock.parse(List<Map<String, Any?>>)` helper can handle the
  * same shape used for live `content.blocks` SSE payloads.
  */
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class APIMessageMetadata(
     val contentBlocks: List<JsonObject>? = null,
-    val toolName: String? = null
+    val toolName: String? = null,
+    /** Ids of files attached to a user message (resolve names with the attachments list). */
+    @JsonNames("attachment_ids") val attachmentIds: List<String>? = null
 )
 
 /** Tool call from API */

@@ -90,7 +90,10 @@ suspend fun APIClient.createRun(
         put("messages", JSONArray().apply {
             messages.forEach { msg ->
                 put(JSONObject().apply {
-                    msg.forEach { (k, v) -> put(k, v) }
+                    msg.forEach { (k, v) ->
+                        // Lists (e.g. attachment_ids) go on the wire as JSON arrays.
+                        if (v is Collection<*>) put(k, JSONArray(v)) else put(k, v)
+                    }
                 })
             }
         })

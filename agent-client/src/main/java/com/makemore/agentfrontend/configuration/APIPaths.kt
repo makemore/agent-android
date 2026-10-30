@@ -54,8 +54,25 @@ data class APIPaths(
     val voiceTts: String? = "/api/agent-runtime/voice/tts/",
 
     /** Voice catalogue endpoint. */
-    val voiceVoices: String? = "/api/agent-runtime/voice/voices/"
+    val voiceVoices: String? = "/api/agent-runtime/voice/voices/",
+
+    /**
+     * The thread's attachments URL (Studio: `/api/.../threads/<thread id>/attachments/`).
+     * `POST` uploads one file (multipart field `file`), `GET` lists, `GET <id>/` downloads.
+     * `null` (the default) means this host keeps no attachments: the attach button is hidden
+     * and the message carries no `attachment_ids`.
+     */
+    val attachments: String? = null
 ) {
+    /** True when the host gave an attachments URL. */
+    val attachmentsEnabled: Boolean get() = !attachments.isNullOrEmpty()
+
+    /** The attachments URL (or `<id>/` under it), or null when none is configured. */
+    fun attachmentsUrl(suffix: String = ""): String? {
+        val base = attachments?.takeIf { it.isNotEmpty() } ?: return null
+        return (if (base.endsWith("/")) base else "$base/") + suffix
+    }
+
     /** Get the run events URL with the run ID substituted */
     fun runEventsUrl(runId: String): String =
         runEvents.replace("{runId}", runId)

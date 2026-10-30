@@ -48,9 +48,9 @@ In your app module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.makemore.agent-android:agent-frontend:3.1.0")   // Compose UI + headless core
+    implementation("com.github.makemore.agent-android:agent-frontend:3.2.0")   // Compose UI + headless core
     // or, headless only:
-    // implementation("com.github.makemore.agent-android:agent-client:3.1.0")
+    // implementation("com.github.makemore.agent-android:agent-client:3.2.0")
 }
 ```
 
@@ -458,8 +458,20 @@ The `:example` module is a manual scenario launcher for the chat widget. Open th
 
 ## Changelog
 
-### Unreleased
+### 3.2.0
 
+- **Chat attachments.** Set `APIPaths.attachments` to the thread's attachments URL (Studio:
+  `/studio/api/workspace/threads/<thread id>/attachments/`) and the composer offers Add photos (the system photo
+  picker), Add files and the camera. Each file uploads as soon as it is picked (`APIClient.uploadAttachment`,
+  multipart field `file`, with progress; `listAttachments`, `fetchAttachment`), at most 3 at once, with its own
+  progress, retry and remove; sending waits only while an upload runs, up to 20 files a message (25 MB a file, 20 MB
+  a photo; photos are re-encoded as JPEG, longest side 4096, EXIF orientation applied, when too big or not
+  png/jpeg/gif/webp). The user message carries `attachment_ids`; history names come from the list call
+  (`APIMessageMetadata.attachmentIds`). Without `APIPaths.attachments` (or on 503 `attachments_unavailable`) the
+  attach button is hidden. `ChatViewModel.attachments` (`AttachmentStager`) holds the staged files.
+- **Fixed:** `sendMessageAndAwait(files = ...)` showed files in the transcript but never sent them. Files now travel
+  as `attachment_ids` (files with bytes and no id are uploaded first); with no attachments URL the send is refused
+  with a message instead of dropping them. A message of files alone can now be sent.
 - **Web access.** `ChatViewModel.webAccessAvailable` comes from the runtime's new
   `GET runs/features/?agent_key=` (`APIClient.loadAgentFeatures`, `AgentFeatures` in agent-client): the agent's own
   web access setting and the host's policy (agent_runtime_core.web_access). The Add to chat "Web"
