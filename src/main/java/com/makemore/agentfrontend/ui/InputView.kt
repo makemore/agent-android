@@ -58,7 +58,9 @@ import android.speech.SpeechRecognizer
 import android.util.Log
 import com.makemore.agentfrontend.configuration.ChatWidgetConfig
 import com.makemore.agentfrontend.voice.SpeechInputPolicy
+import com.makemore.agentfrontend.models.AttachmentLimits
 import com.makemore.agentfrontend.models.FileAttachment
+import com.makemore.agentfrontend.viewmodels.StagedAttachment
 import com.makemore.agentfrontend.services.SharedPreferencesStorage
 import com.makemore.agentfrontend.viewmodels.ChatViewModel
 import com.makemore.agentfrontend.voice.VoiceController
@@ -163,10 +165,17 @@ fun InputView(
     // Compose-tracked state.
     val inputTextState = remember { mutableStateOf("") }
     val inputText = inputTextState.value
-    // Files staged by the user via the AddToChatSheet (camera) before
-    // hitting send. They flow through with the next turn and reset.
-    val attachedFiles = remember { mutableStateListOf<FileAttachment>() }
-    val canSend = inputText.isNotBlank() || attachedFiles.isNotEmpty()
+    // Files staged via the AddToChatSheet: each uploads as soon as it is picked
+    // (state lives in the view model's stager) and goes with the next turn as
+    // `attachment_ids`. Without a view model or an attachments URL there is no
+    // attach button, so a file is never taken and then dropped.
+    val stager = viewModel?.attachments
+    val attachmentsAvailable = config.enableFiles && stager?.available == true
+    var attachmentNotice by remember { mutableStateOf<String?>(null) }
+    fun hasSendableFiles() = stager?.uploadedIds()?.isNotEmpty() == true
+    // Sending waits for uploads in progress, and only then.
+    fun uploadsRunning() = stager?.isUploading == true
+    val canSend = (inputText.isNotBlank() || hasSendableFiles()) && !uploadsRunning()
     // `inputText`, `canSend` and `isRecording` above are composition-time
     // snapshots: fine for laying out the composer, wrong inside the
     // recogniser listener. That listener is registered once in a
@@ -175,7 +184,7 @@ fun InputView(
     // Anything a callback or a timer evaluates must read the state
     // objects live instead.
     fun canSendNow(): Boolean =
-        inputTextState.value.isNotBlank() || attachedFiles.isNotEmpty()
+        (inputTextState.value.isNotBlank() || hasSendableFiles()) && !uploadsRunning()
     val isRecordingState = remember { mutableStateOf(false) }
     val isRecording = isRecordingState.value
     // Seeded from the real grant. It used to start false on every visit, so
@@ -233,27 +242,42 @@ fun InputView(
         if (!granted) startDictationOnGrant = false
     }
 
+    // Stage picked files: read off the main thread (refusing over-limit files before
+    // reading), prepare photos, then upload each straight away.
+    fun stagePicked(read: suspend () -> List<PickedFile>) {
+        val target = stager ?: return
+        coroutineScope.launch {
+            val picked = read()
+            attachmentNotice = picked.filterIsInstance<PickedFile.Refused>().lastOrNull()?.message
+            val refused = target.add(picked.filterIsInstance<PickedFile.Ready>().map { it.input })
+            if (refused != null) attachmentNotice = refused
+        }
+    }
+
     // Camera capture — TakePicturePreview returns a thumbnail Bitmap
-    // which we re-encode as JPEG and stage as a FileAttachment so it
-    // travels through the same upload pipeline as picker-sourced files.
+    // which we re-encode as JPEG and stage like any picked file.
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicturePreview()
     ) { bitmap: Bitmap? ->
-        val attachment = bitmap?.let { makeAttachment(it) }
-        if (attachment != null) attachedFiles.add(attachment)
+        if (bitmap != null) stagePicked {
+            listOf(AttachmentReader.fromBitmap(bitmap, "camera-${System.currentTimeMillis() / 1000}.jpg"))
+        }
+    }
+
+    // Photo picker: permission-free, many photos at once.
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia()
+    ) { uris: List<Uri> ->
+        if (uris.isNotEmpty()) stagePicked { uris.map { AttachmentReader.read(context, it) } }
     }
 
     // System document picker. OpenMultipleDocuments is permission-free
     // (the picker UI runs in a separate process and returns content://
-    // URIs the host can read). We immediately materialise each URI to
-    // bytes so the staged FileAttachment is self-contained and travels
-    // with the next createRun multipart request.
+    // URIs the host can read).
     val documentPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
-        uris.forEach { uri ->
-            readDocumentAttachment(context, uri)?.let { attachedFiles.add(it) }
-        }
+        if (uris.isNotEmpty()) stagePicked { uris.map { AttachmentReader.read(context, it) } }
     }
 
     val effectiveSpeechInputPolicy = config.effectiveSpeechInputPolicy
@@ -361,9 +385,10 @@ fun InputView(
         lastSendWasMic = isRecordingState.value
         cancelSilenceTimer()
         val textToSend = inputTextState.value
-        val filesToSend = attachedFiles.toList()
+        val filesToSend = stager?.uploadedFiles().orEmpty()
         inputTextState.value = ""
-        attachedFiles.clear()
+        // Failed files stay in the composer (red, with retry) rather than vanishing.
+        stager?.clearUploaded()
         if (isRecordingState.value) {
             // Continuous voice mode: keep the recognizer alive, just
             // recycle so the next utterance starts fresh.
@@ -584,11 +609,23 @@ fun InputView(
     }
 
     Column {
-        if (attachedFiles.isNotEmpty()) {
+        if (stager != null && stager.items.isNotEmpty()) {
             AttachedFilesRow(
                 config = config,
-                files = attachedFiles,
-                onRemove = { f -> attachedFiles.removeAll { it.id == f.id } },
+                files = stager.items,
+                onRemove = { stager.remove(it.localId) },
+                onRetry = { stager.retry(it.localId) },
+            )
+        }
+        attachmentNotice?.let { notice ->
+            Text(
+                text = notice,
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { attachmentNotice = null }
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
             )
         }
         when (config.appearance.composerStyle) {
@@ -601,6 +638,7 @@ fun InputView(
                         dismissTextKeyboard()
                         showAddToChat = true
                     },
+                    showAttach = attachmentsAvailable,
                     onSend = { doSend() },
                     voiceEnabled = speechInputAvailable,
                     isRecording = isRecording,
@@ -661,6 +699,7 @@ fun InputView(
                         dismissTextKeyboard()
                         showAddToChat = true
                     },
+                    showAttach = attachmentsAvailable,
                     voiceEnabled = speechInputAvailable,
                     isRecording = isRecording,
                     autoSendEnabled = autoSendEnabled,
@@ -702,6 +741,12 @@ fun InputView(
                 // honours per-app type filters callers might set later.
                 documentPickerLauncher.launch(arrayOf("*/*"))
             },
+            onAddPhotos = {
+                showAddToChat = false
+                photoPickerLauncher.launch(
+                    androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
             onDismiss = { showAddToChat = false },
             viewModel = viewModel,
             onCaptureImage = { cameraLauncher.launch(null) },
@@ -709,65 +754,19 @@ fun InputView(
     }
 }
 
-/** Re-encode a camera-preview [Bitmap] as JPEG @ 0.9 quality and wrap
- *  it as a [FileAttachment] so it flows through the same upload
- *  pipeline as files picked from the document browser. */
-private fun makeAttachment(bitmap: Bitmap): FileAttachment? {
-    val stream = ByteArrayOutputStream()
-    val ok = bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
-    if (!ok) return null
-    val bytes = stream.toByteArray()
-    val name = "camera-${System.currentTimeMillis() / 1000}.jpg"
-    return FileAttachment(name = name, size = bytes.size, type = "image/jpeg", data = bytes)
-}
-
-/** Resolve a SAF [Uri] returned by the system document picker to a
- *  self-contained [FileAttachment]. Display name + size are looked up
- *  via [OpenableColumns]; mime type falls back to the resolver's type
- *  when the cursor row is sparse. Bytes are read eagerly because the
- *  Uri's read permission only lives for the activity result lifetime,
- *  and the attachment may be deferred behind several UI ticks before
- *  it's actually uploaded. */
-private fun readDocumentAttachment(context: Context, uri: Uri): FileAttachment? {
-    val resolver: ContentResolver = context.contentResolver
-    val mime = resolver.getType(uri) ?: "application/octet-stream"
-    var displayName: String? = null
-    var declaredSize: Int? = null
-    runCatching {
-        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (nameIdx >= 0 && !cursor.isNull(nameIdx)) displayName = cursor.getString(nameIdx)
-                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) declaredSize = cursor.getLong(sizeIdx).toInt()
-                }
-            }
-    }
-    val bytes = runCatching {
-        resolver.openInputStream(uri)?.use { it.readBytes() }
-    }.getOrNull() ?: return null
-    val name = displayName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "attachment"
-    return FileAttachment(
-        name = name,
-        size = declaredSize ?: bytes.size,
-        type = mime,
-        data = bytes,
-    )
-}
-
 private fun isLocalSpeechRecognitionAvailable(context: Context): Boolean {
     return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
         SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
 }
 
-/** Horizontally scrolling chip row previewing files the user has
- *  staged for the next turn. Each chip carries a remove affordance. */
+/** Horizontally scrolling chip row of files staged for the next turn: each shows its upload
+ *  progress, and a failed one offers retry. Every chip can be removed. */
 @Composable
 private fun AttachedFilesRow(
     config: ChatWidgetConfig,
-    files: List<FileAttachment>,
-    onRemove: (FileAttachment) -> Unit,
+    files: List<StagedAttachment>,
+    onRemove: (StagedAttachment) -> Unit,
+    onRetry: (StagedAttachment) -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -777,6 +776,7 @@ private fun AttachedFilesRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         files.forEach { file ->
+            val status = file.status
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
@@ -784,19 +784,57 @@ private fun AttachedFilesRow(
                     .padding(start = 10.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
-                    contentDescription = null,
-                    tint = config.appearance.textSecondary,
-                    modifier = Modifier.size(14.dp),
-                )
+                when (status) {
+                    is StagedAttachment.Status.Uploading -> CircularProgressIndicator(
+                        progress = { status.progress.toFloat() },
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = config.appearance.accent,
+                    )
+                    else -> Icon(
+                        imageVector = Icons.AutoMirrored.Outlined.InsertDriveFile,
+                        contentDescription = null,
+                        tint = if (status is StagedAttachment.Status.Failed) MaterialTheme.colorScheme.error
+                        else config.appearance.textSecondary,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
                 Spacer(modifier = Modifier.size(6.dp))
-                Text(
-                    text = file.name,
-                    color = config.appearance.textPrimary,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                )
+                Column {
+                    Text(
+                        text = file.name,
+                        color = config.appearance.textPrimary,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 160.dp),
+                    )
+                    if (status is StagedAttachment.Status.Failed) {
+                        Text(
+                            text = status.message,
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                            modifier = Modifier.widthIn(max = 160.dp),
+                        )
+                    }
+                }
+                if (status is StagedAttachment.Status.Failed) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .clickable { onRetry(file) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Retry",
+                            tint = config.appearance.textSecondary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                }
                 Box(
                     modifier = Modifier
                         .size(24.dp)
@@ -823,6 +861,7 @@ private fun ClassicComposer(
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onAddToChat: () -> Unit,
+    showAttach: Boolean,
     voiceEnabled: Boolean,
     isRecording: Boolean,
     autoSendEnabled: Boolean,
@@ -844,7 +883,7 @@ private fun ClassicComposer(
         // File attachment button — routes through the AddToChatSheet
         // so classic hosts get the same attach/connectors picker as
         // anthropic. Hosts without `enableFiles` keep the slimmer row.
-        if (config.enableFiles) {
+        if (showAttach) {
             IconButton(
                 onClick = onAddToChat,
                 modifier = Modifier.size(40.dp)
@@ -913,6 +952,7 @@ private fun AnthropicComposer(
     inputText: String,
     onInputChange: (String) -> Unit,
     onAddToChat: () -> Unit,
+    showAttach: Boolean,
     onSend: () -> Unit,
     voiceEnabled: Boolean,
     isRecording: Boolean,
@@ -1110,7 +1150,7 @@ private fun AnthropicComposer(
                         onClick = onToggleSpeakReplies,
                     )
                 }
-                if (!showsWaveform && config.enableFiles) {
+                if (!showsWaveform && showAttach) {
                     CircularIconButton(
                         icon = Icons.Outlined.Add,
                         contentDescription = "Add to chat",

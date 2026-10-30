@@ -61,6 +61,14 @@ class ChatViewModel(
     val loadingMoreMessages = mutableStateOf(false)
     val runState = mutableStateOf(RunState.IDLE)
 
+    /** Files attached to the next message: each uploads as soon as it is added. Only usable when
+     *  the host set [com.makemore.agentfrontend.configuration.APIPaths.attachments]. */
+    val attachments = AttachmentStager(
+        scope = viewModelScope,
+        enabled = { config.apiPaths.attachmentsEnabled },
+        upload = { data, name, type, progress -> apiClient.uploadAttachment(data, name, type, progress) },
+    )
+
     /** Transient "what the sub-agents are doing right now" state. Driven
      *  only when [ChatAppearance.subAgentActivityStyle] is `PILL`; the UI
      *  renders [com.makemore.agentfrontend.ui.SubAgentActivityPillView]
@@ -500,7 +508,17 @@ class ChatViewModel(
         hidden: Boolean = false
     ) {
         val trimmed = content.trim()
-        if (!foreground || !owns(operationGeneration) || trimmed.isEmpty() || isLoading.value) return
+        // A message of files alone can go: only a send with neither text nor files is empty.
+        if (!foreground || !owns(operationGeneration) || (trimmed.isEmpty() && files.isEmpty()) || isLoading.value) return
+        if (files.size > AttachmentLimits.MAX_PER_MESSAGE) {
+            error.value = "You can attach up to ${AttachmentLimits.MAX_PER_MESSAGE} files to one message."
+            return
+        }
+        // Files the agent can't be given must never be dropped silently.
+        if (files.any { it.attachmentId == null } && (!apiClient.attachmentsEnabled || !attachments.available)) {
+            error.value = "Files can't be added here."
+            return
+        }
         if (pendingStore.load() != null) {
             error.value = "A reply is still pending. Recover it or cancel before sending another message."
             onForeground()
@@ -518,6 +536,29 @@ class ChatViewModel(
         runState.value = RunState.SENDING
         error.value = null
 
+        // Files handed in without a server id (not staged through [attachments]) upload now.
+        var sendFiles = files
+        if (files.any { it.attachmentId == null }) {
+            try {
+                sendFiles = files.map { f ->
+                    if (f.attachmentId != null) f else {
+                        val bytes = f.data ?: throw AttachmentUploadError.Rejected("${f.name} has no data to send.")
+                        f.copy(attachmentId = apiClient.uploadAttachment(bytes, f.name, f.type).id)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (owns(generation)) {
+                    isLoading.value = false
+                    runState.value = RunState.IDLE
+                    error.value = (e as? AttachmentUploadError)?.message ?: "Upload failed. Try again."
+                }
+                return
+            }
+        }
+        val attachmentIds = sendFiles.mapNotNull { it.attachmentId }
+
         // New turn — drop any half-spoken audio from the previous assistant
         // response and clear the chunker's buffer.
         voiceController?.reset()
@@ -528,7 +569,7 @@ class ChatViewModel(
             messages.add(Message(
                 role = MessageRole.USER,
                 content = trimmed,
-                files = files.ifEmpty { null }
+                files = sendFiles.ifEmpty { null }
             ))
         }
 
@@ -541,9 +582,9 @@ class ChatViewModel(
                     // (a hidden trigger was never appended).
                     .let { if (hidden) it else it.dropLast(1) }
                     .map { mapOf("role" to it.role.value, "content" to (it.content ?: "")) }
-                history + listOf(mapOf("role" to "user", "content" to trimmed))
+                history + listOf(userMessage(trimmed, attachmentIds))
             } else {
-                listOf(mapOf("role" to "user", "content" to trimmed))
+                listOf(userMessage(trimmed, attachmentIds))
             }
 
             // Resolve the per-turn model + thinking flag against the
@@ -618,6 +659,31 @@ class ChatViewModel(
                 }
             } else {
                 showRecoveryError(e)
+            }
+        }
+    }
+
+    private fun userMessage(content: String, attachmentIds: List<String>): Map<String, Any> =
+        buildMap {
+            put("role", "user")
+            put("content", content)
+            if (attachmentIds.isNotEmpty()) put("attachment_ids", attachmentIds)
+        }
+
+    /** Fill in the names of attachments on loaded messages (history carries only their ids). */
+    private fun resolveAttachmentNames() {
+        if (!apiClient.attachmentsEnabled) return
+        val unresolved = { m: Message -> m.files?.any { it.attachmentId != null && it.name == UNRESOLVED_ATTACHMENT_NAME } == true }
+        if (messages.none(unresolved)) return
+        viewModelScope.launch {
+            val byId = runCatching { apiClient.listAttachments() }.getOrNull()?.associateBy { it.id } ?: return@launch
+            for (i in messages.indices) {
+                val m = messages[i]
+                if (!unresolved(m)) continue
+                messages[i] = m.copy(files = m.files?.map { f ->
+                    val found = f.attachmentId?.let { byId[it] }
+                    if (found == null) f else f.copy(name = found.name, size = found.size.toInt(), type = found.contentType)
+                })
             }
         }
     }
@@ -1022,6 +1088,7 @@ class ChatViewModel(
                 conversation.messages?.forEach { apiMsg ->
                     messages.addAll(mapApiMessage(apiMsg))
                 }
+                resolveAttachmentNames()
                 hasMoreMessages.value = conversation.hasMore ?: false
                 messagesOffset = conversation.messages?.size ?: 0
                 nextBeforeSeq = conversation.nextBeforeSeq
@@ -1064,6 +1131,7 @@ class ChatViewModel(
                     val existing = messages.map { it.id }.toMutableSet()
                     val olderMessages = apiMessages.flatMap { mapApiMessage(it) }.filter { existing.add(it.id) }
                     messages.addAll(0, olderMessages)
+                    resolveAttachmentNames()
                     messagesOffset += apiMessages.size
                     nextBeforeSeq = conversation.nextBeforeSeq
                     hasMoreMessages.value = conversation.hasMore ?: false
@@ -2236,7 +2304,10 @@ class ChatViewModel(
             role = MessageRole.fromValue(m.role),
             content = content,
             timestamp = timestamp,
-            type = MessageType.MESSAGE
+            type = MessageType.MESSAGE,
+            files = if (m.role == "user") m.metadata?.attachmentIds?.takeIf { it.isNotEmpty() }?.map {
+                FileAttachment(id = it, name = UNRESOLVED_ATTACHMENT_NAME, size = 0, type = "", attachmentId = it)
+            } else null
         ))
     }
 
@@ -2264,3 +2335,5 @@ private fun JsonElement.toAnyValue(): Any? = when (this) {
     is JsonArray -> map { it.toAnyValue() }
 }
 
+/** Shown for an attachment whose name hasn't been looked up yet. */
+private const val UNRESOLVED_ATTACHMENT_NAME = "Attachment"

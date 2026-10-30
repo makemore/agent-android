@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.GridView
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Language
 import androidx.compose.material.icons.outlined.Search
@@ -72,6 +73,7 @@ fun AddToChatSheet(
     onAddFiles: () -> Unit,
     onDismiss: () -> Unit,
     viewModel: ChatViewModel? = null,
+    onAddPhotos: (() -> Unit)? = null,
     onCaptureImage: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -98,7 +100,7 @@ fun AddToChatSheet(
                     onCaptureImage = onCaptureImage,
                     onDismiss = onDismiss,
                 )
-                RowsCard(config = config, viewModel = viewModel, onAddFiles = onAddFiles)
+                RowsCard(config = config, viewModel = viewModel, onAddFiles = onAddFiles, onAddPhotos = onAddPhotos)
                 TogglesCard(config = config, viewModel = viewModel)
                 ConnectorsCard(config)
             }
@@ -270,6 +272,7 @@ private fun RowsCard(
     config: ChatWidgetConfig,
     viewModel: ChatViewModel?,
     onAddFiles: () -> Unit,
+    onAddPhotos: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -277,6 +280,10 @@ private fun RowsCard(
             .clip(RoundedCornerShape(14.dp))
             .background(config.appearance.surface),
     ) {
+        if (onAddPhotos != null) {
+            ActionRow(config, icon = Icons.Outlined.Image, label = "Add photos", onClick = onAddPhotos)
+            RowDivider(config)
+        }
         ActionRow(config, icon = Icons.Outlined.UploadFile, label = "Add files", onClick = onAddFiles)
         RowDivider(config)
         // Project linking isn't wired to the runtime yet — render the

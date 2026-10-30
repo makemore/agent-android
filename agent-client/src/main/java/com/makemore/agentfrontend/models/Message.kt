@@ -105,7 +105,9 @@ data class FileAttachment(
     val size: Int,
     val type: String,
     val url: String? = null,
-    val data: ByteArray? = null
+    val data: ByteArray? = null,
+    /** Server id once uploaded to the host's attachments URL; sent as `attachment_ids`. */
+    val attachmentId: String? = null
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
